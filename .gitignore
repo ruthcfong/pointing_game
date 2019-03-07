@@ -1,3 +1,9 @@
+# IDE files
+.idea/*
+
+# torch checkpoints
+*.pth.tar
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
