@@ -31,5 +31,5 @@ Use [pointing_game.py](pointing_game.py) to evaluate a visualization method on t
 ### VOC2007, VGG16
 * Gradient: 0.6929 (no tolerance or gaussian smoothing)
 * Gradient: 0.7168 (no tolerance; smooth_sigma = 0.02)
-* Gradient: TBD (no smoothing, tolerance = 15)
+* Gradient: 0.7461 (no smoothing, tolerance = 15)
 * Gradient: 0.7626 (tolerance = 15, smooth_sigma = 0.02, as in Zhang et al., ECCV 2016)
