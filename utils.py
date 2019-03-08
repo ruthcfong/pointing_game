@@ -17,6 +17,7 @@ import torch.nn as nn
 from torchvision import models
 
 VOC_CLASSES = np.loadtxt('./data/pascal_classes.txt', dtype=str)
+COCO_CATEGORY_IDS = np.loadtxt('./data/coco_category_ids.txt', dtype=int)
 
 
 class FromVOCToOneHotEncoding(object):
@@ -39,6 +40,25 @@ class FromVOCToOneHotEncoding(object):
 
         class_idx = [self.class_to_idx[c] for c in classes]
         label = np.zeros(self.num_classes, dtype=np.float32)
+        label[class_idx] = 1
+        return label
+
+
+class FromCocoToOneHotEncoding(object):
+    def __init__(self, num_classes=80, class_to_idx=None):
+        self.num_classes = num_classes
+        if class_to_idx is None:
+            self.class_to_idx = {c: i for i, c in enumerate(COCO_CATEGORY_IDS)}
+        else:
+            self.class_to_idx = class_to_idx
+        assert(self.num_classes == len(self.class_to_idx))
+
+    def __call__(self, anns):
+        class_idx = []
+        label = np.zeros(self.num_classes, dtype=np.float32)
+        for ann in anns:
+            assert('category_id' in ann)
+            class_idx.append(self.class_to_idx[ann['category_id']])
         label[class_idx] = 1
         return label
 
@@ -125,6 +145,8 @@ def get_finetune_model(arch='vgg16',
     # Set number of classes in dataset.
     if 'voc' in dataset:
         num_classes = 20
+    elif 'coco' in dataset:
+        num_classes = 80
     else:
         assert(False)
 
