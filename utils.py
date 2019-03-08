@@ -303,6 +303,43 @@ def register_hook_on_module(curr_module,
                                 hook_direction=hook_direction)
 
 
+activations = []
+
+def hook_acts(module, input, output):
+    """Forward hook function for saving activations."""
+    activations.append(output)
+
+
+def get_acts(model, input, second_input=None, clone=True):
+    """Returns activations saved using existing hooks."""
+    del activations[:]
+    if second_input is not None:
+        _ = model(input, second_input)
+    else:
+        _ = model(input)
+    if clone:
+        return [a.clone() for a in activations]
+    else:
+        return activations
+
+
+def hook_get_acts(model, layer_names, input, second_input=None, clone=True):
+    """Returns activations at specified layers."""
+    hooks = []
+    for i in range(len(layer_names)):
+        hooks.append(
+            get_pytorch_module(model, layer_names[i]).register_forward_hook(
+                hook_acts))
+
+    acts_res = [a for a in
+                get_acts(model, input, second_input=second_input, clone=clone)]
+
+    for h in hooks:
+        h.remove()
+
+    return acts_res
+
+
 def set_gpu(gpu=None):
     """Set visible gpu(s). This function should be called once at beginning.
 

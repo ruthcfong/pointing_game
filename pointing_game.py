@@ -19,7 +19,8 @@ import torchvision.utils as vutils
 import visdom
 
 from utils import (get_finetune_model, VOC_CLASSES, SimpleToTensor, get_device,
-                   set_gpu, blur_input_tensor, register_hook_on_module)
+                   set_gpu, blur_input_tensor, register_hook_on_module,
+                   hook_get_acts, str2bool)
 
 
 class FromVOCToDenseBoundingBoxes(object):
@@ -138,6 +139,9 @@ def pointing_game(data_dir,
                                checkpoint_path=checkpoint_path,
                                convert_to_fully_convolutional=True)
 
+    device = get_device()
+    model = model.to(device)
+
     # 'guided_backprop' as in Springenberg et al., ICLR Workshop 2015.
     if vis_method == 'guided_backprop':
         # Change backwards function for ReLU.
@@ -147,9 +151,20 @@ def pointing_game(data_dir,
                                 module_type=nn.ReLU,
                                 hook_func=guided_hook_function,
                                 hook_direction='backward')
-
-    device = get_device()
-    model = model.to(device)
+    # 'cam' as in Zhou et al., CVPR 2016.
+    elif vis_method == 'cam':
+        if 'resnet' in arch:
+            # Get third to last layer.
+            print(list(model.children()))
+            layer_name = '%d' % (len(list(model.children())) - 3)
+            layer_names = [layer_name]
+        else:
+            assert(False)
+        last_layer = list(model.children())[-1]
+        assert(isinstance(last_layer, nn.Conv2d))
+        weights = last_layer.state_dict()['weight']
+        assert(len(weights.shape) == 4)
+        assert(weights.shape[2] == 1 and weights.shape[3] == 1)
 
     # Prepare data augmentation.
     assert(isinstance(input_size, int))
@@ -194,15 +209,16 @@ def pointing_game(data_dir,
         x = x.to(device)
         y = y.to(device)
 
+        # Set input batch size to the number of classes.
+        x = x.expand(num_classes, *x.shape[1:])
+        x.requires_grad = True
+
+        model.zero_grad()
+        pred_y = model(x)
+
         # Play pointing game using the specified visualization method.
         # 'gradient' is Simonyan et al., ICLR Workshop 2014.
         if vis_method in ['gradient', 'guided_backprop']:
-            # Set input batch size to the number of classes.
-            x = x.expand(num_classes, *x.shape[1:])
-            x.requires_grad = True
-
-            model.zero_grad()
-            pred_y = model(x)
 
             # Prepare gradient.
             weights = torch.zeros_like(pred_y)
@@ -220,6 +236,12 @@ def pointing_game(data_dir,
             if smooth_sigma > 0:
                 vis = blur_input_tensor(vis,
                                         sigma=smooth_sigma*max(vis.shape[2:]))
+        elif vis_method == 'cam':
+            acts = hook_get_acts(model, layer_names, x)[0]
+            vis_lowres = torch.mean(acts * weights, 1, keepdim=True)
+            vis = nn.functional.interpolate(vis_lowres,
+                                            size=y.shape[2:],
+                                            mode='bilinear')
         else:
             assert(False)
 
@@ -259,6 +281,7 @@ if __name__ == '__main__':
     import traceback
     try:
         parser = argparse.ArgumentParser(description='Learn perturbation mask')
+        parser.register('type', 'bool', str2bool)
         parser.add_argument('--data_dir', type=str,
                             default='/datasets/pascal',
                             help='path to root directory containing data')
@@ -274,7 +297,7 @@ if __name__ == '__main__':
         parser.add_argument('--input_size', type=int, default=224,
                             help='CNN image input size')
         parser.add_argument('--vis_method', type=str,
-                            choices=['gradient', 'guided_backprop'],
+                            choices=['gradient', 'guided_backprop', 'cam'],
                             default='gradient',
                             help='CNN image input size')
         parser.add_argument('--tolerance', type=int, default=0,
