@@ -112,6 +112,8 @@ def get_finetune_model(arch='vgg16',
                        convert_to_fully_convolutional=False):
     # Load pre-trained model.
     model = models.__dict__[arch](pretrained=True)
+    if arch == 'inception_v3':
+        model.aux_logits = False
 
     # Only fine-tune last layer.
     for p in model.parameters():
@@ -189,6 +191,18 @@ def make_fully_convolutional(model):
                 new_model_layers.append(conv)
             else:
                 new_model_layers.append(layer)
+    elif isinstance(model, models.ResNet):
+        new_model_layers = list(model.children())[:-1]
+
+        first_fc = model.fc.state_dict()
+        out_ch, in_ch = first_fc['weight'].shape
+        first_conv = nn.Conv2d(in_ch, out_ch, (1, 1))
+        first_conv.load_state_dict({
+            'weight': first_fc['weight'].view(out_ch, in_ch, 1, 1),
+            'bias': first_fc['bias']
+        })
+
+        new_model_layers.append(first_conv)
     else:
         assert(False)
 
@@ -267,6 +281,26 @@ def replace_module(parent_module, module_path, replacement_module):
         return new_parent_module
     else:
         assert False
+
+
+def register_hook_on_module(curr_module,
+                            module_type,
+                            hook_func,
+                            hook_direction='backward'):
+    """Register hook on all modules of a given type."""
+    if isinstance(curr_module, module_type):
+        if hook_direction == 'forward':
+            curr_module.register_forward_hook(hook_func)
+        elif hook_direction == 'backward':
+            curr_module.register_backward_hook(hook_func)
+        else:
+            raise NotImplementedError('Only "forward" and "backward" are '
+                                      'supported, not %s.' % hook_direction)
+    for m in curr_module.children():
+        register_hook_on_module(m,
+                                module_type,
+                                hook_func,
+                                hook_direction=hook_direction)
 
 
 def set_gpu(gpu=None):

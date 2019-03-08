@@ -11,11 +11,12 @@ import numpy as np
 from skimage.transform import resize
 
 import torch
+import torch.nn as nn
 
 from torchvision import datasets, models, transforms
 
 from utils import (get_finetune_model, VOC_CLASSES, SimpleToTensor, get_device,
-                   set_gpu, blur_input_tensor)
+                   set_gpu, blur_input_tensor, register_hook_on_module)
 
 
 class FromVOCToDenseBoundingBoxes(object):
@@ -176,8 +177,18 @@ def pointing_game(data_dir,
         y = y.to(device)
 
         # Play pointing game using the specified visualization method.
+        # 'guided_backprop' as in Springenberg et al., ICLR Workshop 2015.
+        if vis_method == 'guided_backprop':
+            # Change backwards function for ReLU.
+            def guided_hook_function(module, grad_in, grad_out):
+                return (torch.clamp(grad_in[0], min=0.0),)
+            register_hook_on_module(curr_module=model,
+                                    module_type=nn.ReLU,
+                                    hook_func=guided_hook_function,
+                                    hook_direction='backward')
+
         # 'gradient' is Simonyan et al., ICLR Workshop 2014.
-        if vis_method == 'gradient':
+        if vis_method in ['gradient', 'guided_backprop']:
             # Set input batch size to the number of classes.
             x = x.expand(num_classes, *x.shape[1:])
             x.requires_grad = True
@@ -250,7 +261,8 @@ if __name__ == '__main__':
                             help='name of dataset')
         parser.add_argument('--input_size', type=int, default=224,
                             help='CNN image input size')
-        parser.add_argument('--vis_method', type=str, choices=['gradient'],
+        parser.add_argument('--vis_method', type=str,
+                            choices=['gradient', 'guided_backprop'],
                             default='gradient',
                             help='CNN image input size')
         parser.add_argument('--tolerance', type=int, default=0,
