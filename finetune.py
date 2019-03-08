@@ -9,6 +9,9 @@ import time
 
 import numpy as np
 
+from PIL import ImageFile
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+
 import torch
 import torch.nn as nn
 from torchvision import datasets, models, transforms
