@@ -14,6 +14,9 @@ import torch
 import torch.nn as nn
 
 from torchvision import datasets, models, transforms
+import torchvision.utils as vutils
+
+import visdom
 
 from utils import (get_finetune_model, VOC_CLASSES, SimpleToTensor, get_device,
                    set_gpu, blur_input_tensor, register_hook_on_module)
@@ -102,6 +105,7 @@ def pointing_game(data_dir,
                   vis_method='gradient',
                   tolerance=0,
                   smooth_sigma=0.,
+                  debug=False,
                   print_iter=25,
                   eps=1e-6):
     """
@@ -116,6 +120,7 @@ def pointing_game(data_dir,
         vis_method: String, visualization method.
         tolerance: Integer, number of pixels for tolerance margin.
         smooth_sigma: Float, sigma with which to scale Gaussian kernel.
+        debug: Boolean, if True, show debug visualizations.
         print_iter: Integer, frequency with which to log messages.
         eps: Float, epsilon value to add to denominator for division.
 
@@ -124,11 +129,24 @@ def pointing_game(data_dir,
             avg_acc: Float, pointing game accuracy over all classes,
             acc: ndarray, array containing accuracies for each class.
     """
+    if debug:
+        viz = visdom.Visdom()
+
     # Load fine-tuned model with weights and convert to be fully convolutional.
     model = get_finetune_model(arch=arch,
                                dataset=dataset,
                                checkpoint_path=checkpoint_path,
                                convert_to_fully_convolutional=True)
+
+    # 'guided_backprop' as in Springenberg et al., ICLR Workshop 2015.
+    if vis_method == 'guided_backprop':
+        # Change backwards function for ReLU.
+        def guided_hook_function(module, grad_in, grad_out):
+            return (torch.clamp(grad_in[0], min=0.0),)
+        register_hook_on_module(curr_module=model,
+                                module_type=nn.ReLU,
+                                hook_func=guided_hook_function,
+                                hook_direction='backward')
 
     device = get_device()
     model = model.to(device)
@@ -177,16 +195,6 @@ def pointing_game(data_dir,
         y = y.to(device)
 
         # Play pointing game using the specified visualization method.
-        # 'guided_backprop' as in Springenberg et al., ICLR Workshop 2015.
-        if vis_method == 'guided_backprop':
-            # Change backwards function for ReLU.
-            def guided_hook_function(module, grad_in, grad_out):
-                return (torch.clamp(grad_in[0], min=0.0),)
-            register_hook_on_module(curr_module=model,
-                                    module_type=nn.ReLU,
-                                    hook_func=guided_hook_function,
-                                    hook_direction='backward')
-
         # 'gradient' is Simonyan et al., ICLR Workshop 2014.
         if vis_method in ['gradient', 'guided_backprop']:
             # Set input batch size to the number of classes.
@@ -234,6 +242,10 @@ def pointing_game(data_dir,
                                                         avg_acc,
                                                         time.time() - start))
             start = time.time()
+            if debug:
+                viz.image(vutils.make_grid(x[0].unsqueeze(0), normalize=True),
+                          0)
+                viz.image(vutils.make_grid(vis, normalize=True), 1)
 
     acc = hits / (hits + misses)
     avg_acc = np.mean(acc)
@@ -271,6 +283,7 @@ if __name__ == '__main__':
                             help='amount of Gaussian smoothing to apply')
         parser.add_argument('--gpu', type=int, nargs='*', default=None,
                             help='List of GPU(s) to use.')
+        parser.add_argument('--debug', type='bool', default=False)
 
         args = parser.parse_args()
         set_gpu(args.gpu)
@@ -281,7 +294,8 @@ if __name__ == '__main__':
                       input_size=args.input_size,
                       vis_method=args.vis_method,
                       tolerance=args.tolerance,
-                      smooth_sigma=args.smooth_sigma)
+                      smooth_sigma=args.smooth_sigma,
+                      debug=args.debug)
     except:
         traceback.print_exc(file=sys.stdout)
         sys.exit(1)
