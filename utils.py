@@ -129,7 +129,8 @@ class SimpleToTensor(object):
 def get_finetune_model(arch='vgg16',
                        dataset='voc_2007',
                        checkpoint_path=None,
-                       convert_to_fully_convolutional=False):
+                       convert_to_fully_convolutional=False,
+                       final_gap_layer=False):
     # Load pre-trained model.
     model = models.__dict__[arch](pretrained=True)
     if arch == 'inception_v3':
@@ -168,7 +169,8 @@ def get_finetune_model(arch='vgg16',
 
     # Convert model to fully convolutional one.
     if convert_to_fully_convolutional:
-        model = make_fully_convolutional(model)
+        model = make_fully_convolutional(model,
+                                         final_gap_layer=final_gap_layer)
 
     # Set model to evaluation mode.
     model.eval()
@@ -176,7 +178,7 @@ def get_finetune_model(arch='vgg16',
     return model
 
 
-def make_fully_convolutional(model):
+def make_fully_convolutional(model, final_gap_layer=False):
     if isinstance(model, models.VGG):
         new_model_layers = list(model.features.children())
 
@@ -229,7 +231,8 @@ def make_fully_convolutional(model):
         assert(False)
 
     # Add final global average pooling layer.
-    new_model_layers.append(nn.AdaptiveAvgPool2d((1, 1)))
+    if final_gap_layer:
+        new_model_layers.append(nn.AdaptiveAvgPool2d((1, 1)))
 
     new_model = nn.Sequential(*new_model_layers)
 
