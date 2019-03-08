@@ -228,6 +228,9 @@ def make_fully_convolutional(model):
     else:
         assert(False)
 
+    # Add final global average pooling layer.
+    new_model_layers.append(nn.AdaptiveAvgPool2d((1, 1)))
+
     new_model = nn.Sequential(*new_model_layers)
 
     return new_model
