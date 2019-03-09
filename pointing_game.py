@@ -11,11 +11,16 @@ import numpy as np
 from skimage.transform import resize
 
 import torch
+import torch.nn as nn
 
 from torchvision import datasets, models, transforms
+import torchvision.utils as vutils
+
+import visdom
 
 from utils import (get_finetune_model, VOC_CLASSES, SimpleToTensor, get_device,
-                   set_gpu, blur_input_tensor)
+                   set_gpu, blur_input_tensor, register_hook_on_module,
+                   hook_get_acts, str2bool)
 
 
 class FromVOCToDenseBoundingBoxes(object):
@@ -101,6 +106,8 @@ def pointing_game(data_dir,
                   vis_method='gradient',
                   tolerance=0,
                   smooth_sigma=0.,
+                  final_gap_layer=False,
+                  debug=False,
                   print_iter=25,
                   eps=1e-6):
     """
@@ -115,6 +122,8 @@ def pointing_game(data_dir,
         vis_method: String, visualization method.
         tolerance: Integer, number of pixels for tolerance margin.
         smooth_sigma: Float, sigma with which to scale Gaussian kernel.
+        final_gap_layer: Boolean, if True, add a final gap layer.
+        debug: Boolean, if True, show debug visualizations.
         print_iter: Integer, frequency with which to log messages.
         eps: Float, epsilon value to add to denominator for division.
 
@@ -123,14 +132,42 @@ def pointing_game(data_dir,
             avg_acc: Float, pointing game accuracy over all classes,
             acc: ndarray, array containing accuracies for each class.
     """
+    if debug:
+        viz = visdom.Visdom()
+
     # Load fine-tuned model with weights and convert to be fully convolutional.
     model = get_finetune_model(arch=arch,
                                dataset=dataset,
                                checkpoint_path=checkpoint_path,
-                               convert_to_fully_convolutional=True)
+                               convert_to_fully_convolutional=True,
+                               final_gap_layer=final_gap_layer)
 
     device = get_device()
     model = model.to(device)
+
+    # 'guided_backprop' as in Springenberg et al., ICLR Workshop 2015.
+    if vis_method == 'guided_backprop':
+        # Change backwards function for ReLU.
+        def guided_hook_function(module, grad_in, grad_out):
+            return (torch.clamp(grad_in[0], min=0.0),)
+        register_hook_on_module(curr_module=model,
+                                module_type=nn.ReLU,
+                                hook_func=guided_hook_function,
+                                hook_direction='backward')
+    # 'cam' as in Zhou et al., CVPR 2016.
+    elif vis_method == 'cam':
+        if 'resnet' in arch:
+            # Get third to last layer.
+            print(list(model.children()))
+            layer_name = '%d' % (len(list(model.children())) - 3)
+            layer_names = [layer_name]
+        else:
+            assert(False)
+        last_layer = list(model.children())[-1]
+        assert(isinstance(last_layer, nn.Conv2d))
+        weights = last_layer.state_dict()['weight']
+        assert(len(weights.shape) == 4)
+        assert(weights.shape[2] == 1 and weights.shape[3] == 1)
 
     # Prepare data augmentation.
     assert(isinstance(input_size, int))
@@ -175,15 +212,16 @@ def pointing_game(data_dir,
         x = x.to(device)
         y = y.to(device)
 
+        # Set input batch size to the number of classes.
+        x = x.expand(num_classes, *x.shape[1:])
+        x.requires_grad = True
+
+        model.zero_grad()
+        pred_y = model(x)
+
         # Play pointing game using the specified visualization method.
         # 'gradient' is Simonyan et al., ICLR Workshop 2014.
-        if vis_method == 'gradient':
-            # Set input batch size to the number of classes.
-            x = x.expand(num_classes, *x.shape[1:])
-            x.requires_grad = True
-
-            model.zero_grad()
-            pred_y = model(x)
+        if vis_method in ['gradient', 'guided_backprop']:
 
             # Prepare gradient.
             weights = torch.zeros_like(pred_y)
@@ -201,6 +239,12 @@ def pointing_game(data_dir,
             if smooth_sigma > 0:
                 vis = blur_input_tensor(vis,
                                         sigma=smooth_sigma*max(vis.shape[2:]))
+        elif vis_method == 'cam':
+            acts = hook_get_acts(model, layer_names, x)[0]
+            vis_lowres = torch.mean(acts * weights, 1, keepdim=True)
+            vis = nn.functional.interpolate(vis_lowres,
+                                            size=y.shape[2:],
+                                            mode='bilinear')
         else:
             assert(False)
 
@@ -223,6 +267,10 @@ def pointing_game(data_dir,
                                                         avg_acc,
                                                         time.time() - start))
             start = time.time()
+            if debug:
+                viz.image(vutils.make_grid(x[0].unsqueeze(0), normalize=True),
+                          0)
+                viz.image(vutils.make_grid(vis, normalize=True), 1)
 
     acc = hits / (hits + misses)
     avg_acc = np.mean(acc)
@@ -236,6 +284,7 @@ if __name__ == '__main__':
     import traceback
     try:
         parser = argparse.ArgumentParser(description='Learn perturbation mask')
+        parser.register('type', 'bool', str2bool)
         parser.add_argument('--data_dir', type=str,
                             default='/datasets/pascal',
                             help='path to root directory containing data')
@@ -250,15 +299,19 @@ if __name__ == '__main__':
                             help='name of dataset')
         parser.add_argument('--input_size', type=int, default=224,
                             help='CNN image input size')
-        parser.add_argument('--vis_method', type=str, choices=['gradient'],
+        parser.add_argument('--vis_method', type=str,
+                            choices=['gradient', 'guided_backprop', 'cam'],
                             default='gradient',
                             help='CNN image input size')
         parser.add_argument('--tolerance', type=int, default=0,
                             help='amount of tolerance to add')
         parser.add_argument('--smooth_sigma', type=float, default=0.,
                             help='amount of Gaussian smoothing to apply')
+        parser.add_argument('--final_gap_layer', type='bool', default=False,
+                            help='if True, add a final GAP layer')
         parser.add_argument('--gpu', type=int, nargs='*', default=None,
                             help='List of GPU(s) to use.')
+        parser.add_argument('--debug', type='bool', default=False)
 
         args = parser.parse_args()
         set_gpu(args.gpu)
@@ -269,7 +322,9 @@ if __name__ == '__main__':
                       input_size=args.input_size,
                       vis_method=args.vis_method,
                       tolerance=args.tolerance,
-                      smooth_sigma=args.smooth_sigma)
+                      smooth_sigma=args.smooth_sigma,
+                      final_gap_layer=args.final_gap_layer,
+                      debug=args.debug)
     except:
         traceback.print_exc(file=sys.stdout)
         sys.exit(1)

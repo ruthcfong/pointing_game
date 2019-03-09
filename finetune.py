@@ -9,13 +9,16 @@ import time
 
 import numpy as np
 
+from PIL import ImageFile
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+
 import torch
 import torch.nn as nn
 from torchvision import datasets, models, transforms
 
 from utils import (set_gpu, get_device, create_dir_if_necessary,
                    get_finetune_model, SimpleToTensor, str2bool,
-                   FromVOCToOneHotEncoding)
+                   FromVOCToOneHotEncoding, FromCocoToOneHotEncoding)
 
 
 class AverageMeter(object):
@@ -185,6 +188,9 @@ def finetune(data_dir,
              checkpoint_path,
              arch='vgg16',
              dataset='voc_2007',
+             ann_dir=None,
+             train_split='train',
+             val_split='val',
              input_size=224,
              optimizer_name='SGD',
              lr=1e-2,
@@ -231,22 +237,41 @@ def finetune(data_dir,
         normalize,
     ])
 
-    target_transform = transforms.Compose([
-        FromVOCToOneHotEncoding(),
-        SimpleToTensor(),
-    ])
-
     # Prepare data loaders.
     if 'voc' in dataset:
         year = dataset.split('_')[-1]
+
+        target_transform = transforms.Compose([
+            FromVOCToOneHotEncoding(),
+            SimpleToTensor(),
+        ])
+
         train_dset = datasets.VOCDetection(data_dir,
                                            year=year,
-                                           image_set='train',
+                                           image_set=train_split,
                                            transform=train_transform,
                                            target_transform=target_transform)
         val_dset = datasets.VOCDetection(data_dir,
                                          year=year,
-                                         image_set='val',
+                                         image_set=val_split,
+                                         transform=val_transform,
+                                         target_transform=target_transform)
+    elif 'coco' in dataset:
+        train_ann_path = os.path.join(ann_dir,
+                                      'instances_%s.json' % train_split)
+        val_ann_path = os.path.join(ann_dir, 'instances_%s.json' % val_split)
+
+        target_transform = transforms.Compose([
+            FromCocoToOneHotEncoding(),
+            SimpleToTensor(),
+        ])
+        train_dset = datasets.CocoDetection(os.path.join(data_dir,
+                                                         train_split),
+                                            train_ann_path,
+                                            transform=train_transform,
+                                            target_transform=target_transform)
+        val_dset = datasets.CocoDetection(os.path.join(data_dir, val_split),
+                                          val_ann_path,
                                          transform=val_transform,
                                          target_transform=target_transform)
     else:
@@ -332,15 +357,25 @@ if __name__ == '__main__':
         parser.add_argument('--data_dir', type=str,
                             default='/datasets/pascal',
                             help='path to root directory containing data')
+        parser.add_argument('--ann_dir', type=str,
+                            default=None,
+                            help='path to root directory containing '
+                                 'annotations (used for COCO)')
         parser.add_argument('--checkpoint_path', type=str,
                             default='checkpoint.pth.tar',
                             help='path to save checkpoint')
         parser.add_argument('--arch', type=str, default='vgg16',
                             help='name of CNN architecture (choose from '
                                  'PyTorch pretrained networks')
-        parser.add_argument('--dataset', choices=['voc_2007'],
+        parser.add_argument('--dataset', choices=['voc_2007', 'coco_2014'],
                             default='voc_2007',
                             help='name of dataset')
+        parser.add_argument('--train_split', choices=['train', 'train2014'],
+                            type=str, default='train',
+                            help='name of training split')
+        parser.add_argument('--val_split', choices=['val', 'val2014'],
+                            type=str, default='val',
+                            help='name of validation split')
         parser.add_argument('--input_size', type=int, default=224,
                             help='CNN image input size')
         parser.add_argument('--optimizer', type=str, default='SGD',
@@ -365,6 +400,9 @@ if __name__ == '__main__':
                  args.checkpoint_path,
                  arch=args.arch,
                  dataset=args.dataset,
+                 ann_dir=args.ann_dir,
+                 train_split=args.train_split,
+                 val_split=args.val_split,
                  input_size=args.input_size,
                  optimizer_name=args.optimizer,
                  lr=args.lr,
