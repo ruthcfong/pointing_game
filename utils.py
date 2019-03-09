@@ -231,7 +231,7 @@ def make_fully_convolutional(model, final_gap_layer=False):
         assert(False)
 
     # Add final global average pooling layer.
-    if final_gap_layer:
+    if final_gap_layer and not isinstance(model, models.ResNet):
         new_model_layers.append(nn.AdaptiveAvgPool2d((1, 1)))
 
     new_model = nn.Sequential(*new_model_layers)

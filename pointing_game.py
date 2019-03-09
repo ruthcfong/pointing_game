@@ -106,6 +106,7 @@ def pointing_game(data_dir,
                   vis_method='gradient',
                   tolerance=0,
                   smooth_sigma=0.,
+                  final_gap_layer=False,
                   debug=False,
                   print_iter=25,
                   eps=1e-6):
@@ -121,6 +122,7 @@ def pointing_game(data_dir,
         vis_method: String, visualization method.
         tolerance: Integer, number of pixels for tolerance margin.
         smooth_sigma: Float, sigma with which to scale Gaussian kernel.
+        final_gap_layer: Boolean, if True, add a final gap layer.
         debug: Boolean, if True, show debug visualizations.
         print_iter: Integer, frequency with which to log messages.
         eps: Float, epsilon value to add to denominator for division.
@@ -137,7 +139,8 @@ def pointing_game(data_dir,
     model = get_finetune_model(arch=arch,
                                dataset=dataset,
                                checkpoint_path=checkpoint_path,
-                               convert_to_fully_convolutional=True)
+                               convert_to_fully_convolutional=True,
+                               final_gap_layer=final_gap_layer)
 
     device = get_device()
     model = model.to(device)
@@ -304,6 +307,8 @@ if __name__ == '__main__':
                             help='amount of tolerance to add')
         parser.add_argument('--smooth_sigma', type=float, default=0.,
                             help='amount of Gaussian smoothing to apply')
+        parser.add_argument('--final_gap_layer', type='bool', default=False,
+                            help='if True, add a final GAP layer')
         parser.add_argument('--gpu', type=int, nargs='*', default=None,
                             help='List of GPU(s) to use.')
         parser.add_argument('--debug', type='bool', default=False)
@@ -318,6 +323,7 @@ if __name__ == '__main__':
                       vis_method=args.vis_method,
                       tolerance=args.tolerance,
                       smooth_sigma=args.smooth_sigma,
+                      final_gap_layer=args.final_gap_layer,
                       debug=args.debug)
     except:
         traceback.print_exc(file=sys.stdout)
