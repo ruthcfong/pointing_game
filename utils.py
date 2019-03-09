@@ -16,7 +16,28 @@ import torch.nn as nn
 
 from torchvision import models
 
-VOC_CLASSES = np.loadtxt('./data/pascal_classes.txt', dtype=str)
+VOC_CLASSES = np.array([
+    'aeroplane',
+    'bicycle',
+    'bird',
+    'boat',
+    'bottle',
+    'bus',
+    'car',
+    'cat',
+    'chair',
+    'cow',
+    'diningtable',
+    'dog',
+    'horse',
+    'motorbike',
+    'person',
+    'pottedplant',
+    'sheep',
+    'sofa',
+    'train',
+    'tvmonitor',
+], dtype=str)
 
 
 class FromVOCToOneHotEncoding(object):
