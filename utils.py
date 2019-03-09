@@ -38,7 +38,7 @@ VOC_CLASSES = np.array([
     'train',
     'tvmonitor',
 ], dtype=str)
-COCO_CATEGORY_IDS = np.loadtxt('./data/coco_category_ids.txt', dtype=int)
+COCO_CATEGORY_IDS = np.loadtxt(os.path.join(os.path.dirname(__file__), 'data/coco_category_ids.txt'), dtype=int)
 
 
 class FromVOCToOneHotEncoding(object):
