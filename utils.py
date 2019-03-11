@@ -114,7 +114,6 @@ class RISE(nn.Module):
             assert(p.shape[3] == 1)
             p = p[:,:,0,0]
 
-        print(p.shape, self.masks.shape)
         sal = torch.matmul(p.data.transpose(0, 1),
                            self.masks.view(N, H * W))
         sal = sal.view((CL, H, W))
