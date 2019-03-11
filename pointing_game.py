@@ -86,7 +86,7 @@ class FromVOCToDenseBoundingBoxes(object):
         assert('width' in d['annotation']['size'])
         assert('height' in d['annotation']['size'])
         assert('object' in d['annotation'])
-
+  
         # Define dense bounding boxes array to be C x H x W.
         height = int(d['annotation']['size']['height'])
         width = int(d['annotation']['size']['width'])
@@ -102,6 +102,7 @@ class FromVOCToDenseBoundingBoxes(object):
             assert('bndbox' in obj)
             assert(obj['bndbox'].keys()
                    == set(['xmin', 'xmax', 'ymin', 'ymax']))
+            assert(obj['difficult'] in ['0','1'])
             # Get object class.
             class_i = self.class_to_idx[obj['name']]
 
