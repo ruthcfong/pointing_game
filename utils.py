@@ -11,10 +11,14 @@ import os
 
 import numpy as np
 
+from skimage.transform import resize
+
 import torch
 import torch.nn as nn
 
 from torchvision import models
+
+from tqdm import tqdm
 
 VOC_CLASSES = np.array([
     'aeroplane',
@@ -39,6 +43,83 @@ VOC_CLASSES = np.array([
     'tvmonitor',
 ], dtype=str)
 COCO_CATEGORY_IDS = np.loadtxt(os.path.join(os.path.dirname(__file__), 'data/coco_category_ids.txt'), dtype=int)
+
+
+class RISE(nn.Module):
+    def __init__(self, model, input_size, gpu_batch=100):
+        super(RISE, self).__init__()
+        self.model = model
+        self.input_size = input_size
+        self.gpu_batch = gpu_batch
+
+    def generate_masks(self, N, s, p1, savepath='masks.npy'):
+        cell_size = np.ceil(np.array(self.input_size) / s)
+        up_size = (s + 1) * cell_size
+
+        grid = np.random.rand(N, s, s) < p1
+        grid = grid.astype('float32')
+
+        self.masks = np.empty((N, *self.input_size))
+
+        for i in tqdm(range(N), desc='Generating filters'):
+            # Random shifts
+            x = np.random.randint(0, cell_size[0])
+            y = np.random.randint(0, cell_size[1])
+            # Linear upsampling and cropping
+            self.masks[i, :, :] = resize(grid[i], up_size, order=1,
+                                         mode='reflect',
+                                         anti_aliasing=False)[x:x + self.input_size[0], y:y + self.input_size[1]]
+        self.masks = self.masks.reshape(-1, 1, *self.input_size)
+        np.save(savepath, self.masks)
+        self.masks = torch.from_numpy(self.masks).float()
+        self.N = N
+        self.p1 = p1
+
+    def load_masks(self, filepath):
+        self.masks = np.load(filepath)
+        self.masks = torch.from_numpy(self.masks).float()
+        self.N = self.masks.shape[0]
+
+    def update_input_size(self, input_size):
+        self.input_size = input_size
+        mask_temp = np.transpose(self.masks[:,0].cpu().data.numpy(),
+                                 (1, 2, 0))
+        mask_temp = resize(mask_temp,
+                           self.input_size,
+                           order=1,
+                           mode='reflect',
+                           anti_aliasing=False)
+        mask_temp = np.transpose(mask_temp, (2, 0, 1))
+        self.masks = torch.from_numpy(mask_temp).float().unsqueeze(1)
+
+    def forward(self, x):
+        N = self.N
+        _, _, H, W = x.size()
+
+        # Apply array of filters to the image.
+        # stack = torch.mul(self.masks, x.data)
+
+        p = []
+        for i in range(0, N, self.gpu_batch):
+            x_new = torch.mul(self.masks[i:min(i + self.gpu_batch, N)],
+                              x.cpu().data).cuda()
+            p.append(self.model(x_new).cpu())
+            torch.cuda.empty_cache()
+        p = torch.cat(p)
+
+        # Number of classes.
+        CL = p.size(1)
+        if len(p.shape) == 4:
+            assert(p.shape[2] == 1)
+            assert(p.shape[3] == 1)
+            p = p[:,:,0,0]
+
+        print(p.shape, self.masks.shape)
+        sal = torch.matmul(p.data.transpose(0, 1),
+                           self.masks.view(N, H * W))
+        sal = sal.view((CL, H, W))
+        sal = sal / N / self.p1
+        return sal
 
 
 class FromVOCToOneHotEncoding(object):

@@ -27,7 +27,7 @@ import visdom
 
 from utils import (get_finetune_model, VOC_CLASSES, SimpleToTensor, get_device,
                    set_gpu, blur_input_tensor, register_hook_on_module,
-                   hook_get_acts, str2bool, COCO_CATEGORY_IDS)
+                   hook_get_acts, str2bool, COCO_CATEGORY_IDS, RISE)
 
 
 class FromCocoToDenseSegmentationMasks(object):
@@ -219,6 +219,9 @@ def pointing_game(data_dir,
         weights = last_layer.state_dict()['weight']
         assert(len(weights.shape) == 4)
         assert(weights.shape[2] == 1 and weights.shape[3] == 1)
+    elif vis_method == 'rise':
+        explainer = RISE(model, (input_size, input_size), gpu_batch=100)
+        explainer.generate_masks(N=6000, s=8, p1=0.1)
 
     # Prepare data augmentation.
     assert(isinstance(input_size, int))
@@ -279,12 +282,13 @@ def pointing_game(data_dir,
         # Move data to device.
         x = x.to(device)
 
-        # Set input batch size to the number of classes.
-        x = x.expand(num_classes, *x.shape[1:])
-        x.requires_grad = True
+        if vis_method != 'rise':
+            # Set input batch size to the number of classes.
+            x = x.expand(num_classes, *x.shape[1:])
+            x.requires_grad = True
 
-        model.zero_grad()
-        pred_y = model(x)
+            model.zero_grad()
+            pred_y = model(x)
 
         # Play pointing game using the specified visualization method.
         # 'gradient' is Simonyan et al., ICLR Workshop 2014.
@@ -312,6 +316,10 @@ def pointing_game(data_dir,
             vis = nn.functional.interpolate(vis_lowres,
                                             size=y.shape[2:],
                                             mode='bilinear')
+        elif vis_method == 'rise':
+            explainer.update_input_size(x.shape[2:])
+            vis = explainer(x)
+            vis = vis.unsqueeze(1)
         else:
             assert(False)
 
@@ -373,14 +381,15 @@ if __name__ == '__main__':
         parser.add_argument('--input_size', type=int, default=224,
                             help='CNN image input size')
         parser.add_argument('--vis_method', type=str,
-                            choices=['gradient', 'guided_backprop', 'cam'],
+                            choices=['gradient', 'guided_backprop', 'cam',
+                                     'rise'],
                             default='gradient',
                             help='CNN image input size')
         parser.add_argument('--tolerance', type=int, default=0,
                             help='amount of tolerance to add')
         parser.add_argument('--smooth_sigma', type=float, default=0.,
                             help='amount of Gaussian smoothing to apply')
-        parser.add_argument('--final_gap_layer', type='bool', default=False,
+        parser.add_argument('--final_gap_layer', type='bool', default=True,
                             help='if True, add a final GAP layer')
         parser.add_argument('--gpu', type=int, nargs='*', default=None,
                             help='List of GPU(s) to use.')
