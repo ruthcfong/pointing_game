@@ -6,8 +6,15 @@ Evaluate visualization method on pointing game evaluation metric.
 The pointing game was originally introduced in
 Zhang et al., ECCV2016. Top-down Neural Attention by Excitation Backprop.
 """
+import os
 import time
+
+import cv2
 import numpy as np
+
+from PIL import ImageFile
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+
 from skimage.transform import resize
 
 import torch
@@ -20,7 +27,45 @@ import visdom
 
 from utils import (get_finetune_model, VOC_CLASSES, SimpleToTensor, get_device,
                    set_gpu, blur_input_tensor, register_hook_on_module,
-                   hook_get_acts, str2bool)
+                   hook_get_acts, str2bool, COCO_CATEGORY_IDS)
+
+
+class FromCocoToDenseSegmentationMasks(object):
+    """Transformation from list of COCO annotation dicts to dense segmentation masks."""
+    def __init__(self, coco, tolerance=0, backup_size=224, num_classes=80, class_to_idx=None):
+        self.coco = coco
+        self.tolerance = tolerance
+        if self.tolerance > 0:
+            self.kernel = np.ones((self.tolerance*2+1, self.tolerance*2+1),
+                                  dtype=np.uint8)
+        self.backup_size = backup_size
+        self.num_classes = num_classes
+        if class_to_idx is None:
+            self.class_to_idx = {c: i for i, c in enumerate(COCO_CATEGORY_IDS)}
+        else:
+            self.class_to_idx = class_to_idx
+        assert(self.num_classes == len(self.class_to_idx))
+
+    def __call__(self, anns):
+        if len(anns) == 0:
+            return np.zeros((self.num_classes,
+                             self.backup_size,
+                             self.backup_size), dtype=np.float32)
+
+        mask = self.coco.annToMask(anns[0])
+        seg_masks = np.zeros((mask.shape[0], mask.shape[1], self.num_classes),
+                             dtype=np.float32)
+        for ann in anns:
+            assert('category_id' in ann)
+            class_i = self.class_to_idx[ann['category_id']]
+            mask = self.coco.annToMask(ann)
+            seg_masks[:, :, class_i] = mask
+
+        if self.tolerance > 0:
+            seg_masks = cv2.dilate(seg_masks, self.kernel, iterations=1)
+        seg_masks = np.transpose(seg_masks, (2, 0, 1))
+
+        return seg_masks
 
 
 class FromVOCToDenseBoundingBoxes(object):
@@ -102,6 +147,8 @@ def pointing_game(data_dir,
                   checkpoint_path,
                   arch='vgg16',
                   dataset='voc_2007',
+                  ann_dir=None,
+                  split='test',
                   input_size=224,
                   vis_method='gradient',
                   tolerance=0,
@@ -118,6 +165,9 @@ def pointing_game(data_dir,
         checkpoint_path: String, path to model checkpoint.
         arch: String, name of torchvision.models architecture.
         dataset: String, name of dataset.
+        ann_dir: String, path to root directory containing annotation files
+            (used for COCO).
+        split: String, name of split to use for evaluation.
         input_size: Integer, length of side of the input image.
         vis_method: String, visualization method.
         tolerance: Integer, number of pixels for tolerance margin.
@@ -179,20 +229,37 @@ def pointing_game(data_dir,
         normalize,
     ])
 
-    target_transform = transforms.Compose([
-        FromVOCToDenseBoundingBoxes(tolerance=tolerance),
-        SimpleResize(input_size),
-        SimpleToTensor(),
-    ])
-
     if 'voc' in dataset:
+        target_transform = transforms.Compose([
+            FromVOCToDenseBoundingBoxes(tolerance=tolerance),
+            SimpleResize(input_size),
+            SimpleToTensor(),
+        ])
+
         num_classes = 20
         year = dataset.split('_')[-1]
         dset = datasets.VOCDetection(data_dir,
                                      year=year,
-                                     image_set='test',
+                                     image_set=split,
                                      transform=transform,
                                      target_transform=target_transform)
+    elif 'coco' in dataset:
+        num_classes = 80
+        print(ann_dir)
+        ann_path = os.path.join(ann_dir, 'instances_%s.json' % split)
+
+        dset = datasets.CocoDetection(os.path.join(data_dir, split),
+                                      ann_path,
+                                      transform=transform,
+                                      target_transform=None)
+
+        target_transform = transforms.Compose([
+            FromCocoToDenseSegmentationMasks(dset.coco, tolerance=tolerance),
+            SimpleResize(input_size),
+            SimpleToTensor(),
+        ])
+
+        dset.target_transform = target_transform
     else:
         assert(False)
 
@@ -210,7 +277,6 @@ def pointing_game(data_dir,
 
         # Move data to device.
         x = x.to(device)
-        y = y.to(device)
 
         # Set input batch size to the number of classes.
         x = x.expand(num_classes, *x.shape[1:])
@@ -294,9 +360,15 @@ if __name__ == '__main__':
         parser.add_argument('--arch', type=str, default='vgg16',
                             help='name of CNN architecture (choose from '
                                  'PyTorch pretrained networks')
-        parser.add_argument('--dataset', choices=['voc_2007'],
+        parser.add_argument('--dataset', choices=['voc_2007', 'coco_2014'],
                             default='voc_2007',
                             help='name of dataset')
+        parser.add_argument('--ann_dir', type=str, default=None,
+                            help='path to root directory containing '
+                                 'annotation files (for COCO).')
+        parser.add_argument('--split', type=str, choices=['test', 'val2014'],
+                            default='test',
+                            help='name of split to use')
         parser.add_argument('--input_size', type=int, default=224,
                             help='CNN image input size')
         parser.add_argument('--vis_method', type=str,
@@ -319,6 +391,8 @@ if __name__ == '__main__':
                       args.checkpoint_path,
                       arch=args.arch,
                       dataset=args.dataset,
+                      ann_dir=args.ann_dir,
+                      split=args.split,
                       input_size=args.input_size,
                       vis_method=args.vis_method,
                       tolerance=args.tolerance,

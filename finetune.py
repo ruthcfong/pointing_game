@@ -203,10 +203,14 @@ def finetune(data_dir,
     Finetune the last layer of a CNN pretrained on ImageNet.
 
     Args:
-        data_dir:
+        data_dir: String, path to root directory containing image files.
         checkpoint_path: String, path to save checkpoint.
         arch: String, name of torchvision.models architecture.
         dataset: String, name of dataset.
+        ann_dir: String, path to root directory containing annotation files
+            (used for COCO).
+        train_split: String, name of split to use for training.
+        val_split: String, name of split to use for validation.
         input_size: Integer, length of the side of the input image.
         optimizer_name: String, name of torch.optim.Optimizer to use.
         lr: Float, learning rate to use.
