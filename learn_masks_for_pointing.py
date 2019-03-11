@@ -130,7 +130,7 @@ if __name__ == '__main__':
         parser.add_argument('--arch', type=str, default='vgg16',
                             help='name of CNN architecture (choose from '
                                  'PyTorch pretrained networks')
-        parser.add_argument('--dataset', choices=['voc_2007'],
+        parser.add_argument('--dataset', choices=['voc_2007', 'coco_2014'],
                             default='voc_2007',
                             help='name of dataset')
         parser.add_argument('--ann_dir', type=str, default=None,
