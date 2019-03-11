@@ -3,19 +3,24 @@ learn_masks_for_pointing.py
 
 Learn masks for the pointing game.
 """
+import os
+
 import numpy as np
 
 import torch
 from torchvision import datasets, transforms
 
 from utils import (set_gpu, get_device, get_finetune_model,
-                   FromVOCToOneHotEncoding, SimpleToTensor)
+                   FromVOCToOneHotEncoding, FromCocoToOneHotEncoding,
+                   SimpleToTensor)
 
 
 def learn_masks_for_pointing(data_dir,
                              checkpoint_path,
                              arch='vgg16',
                              dataset='voc_2007',
+                             ann_dir=None,
+                             split='test',
                              input_size=224):
     """
     Learn explanatory masks for the pointing game.
@@ -25,6 +30,9 @@ def learn_masks_for_pointing(data_dir,
         checkpoint_path: String, path to checkpoint.
         arch: String, name of torchvision.models architecture.
         dataset: String, name of dataset.
+        ann_dir: String, path to root directory containing annotation files
+            (used for COCO).
+        split: String, name of split.
         input_size: Integer, length of the side of the input image.
     """
     # Load fine-tuned model and convert it to be fully convolutional.
@@ -46,19 +54,30 @@ def learn_masks_for_pointing(data_dir,
         normalize,
     ])
 
-    target_transform = transforms.Compose([
-        FromVOCToOneHotEncoding(),
-        SimpleToTensor(),
-    ])
-
     # Prepare data loaders.
     if 'voc' in dataset:
         year = dataset.split('_')[-1]
+
+        target_transform = transforms.Compose([
+            FromVOCToOneHotEncoding(),
+            SimpleToTensor(),
+        ])
+
         dset = datasets.VOCDetection(data_dir,
                                      year=year,
-                                     image_set='test',
+                                     image_set=split,
                                      transform=transform,
                                      target_transform=target_transform)
+    elif 'coco' in dataset:
+        ann_path = os.path.join(ann_dir, 'instances_%s.json' % split)
+        target_transform = transforms.Compose([
+            FromCocoToOneHotEncoding(),
+            SimpleToTensor(),
+        ])
+        dset = datasets.CocoDetection(os.path.join(data_dir, split),
+                                      ann_path,
+                                      transform=transform,
+                                      target_transform=target_transform)
     else:
         assert(False)
 
@@ -114,6 +133,11 @@ if __name__ == '__main__':
         parser.add_argument('--dataset', choices=['voc_2007'],
                             default='voc_2007',
                             help='name of dataset')
+        parser.add_argument('--ann_dir', type=str, default=None,
+                            help='path to annotation directory (for COCO).')
+        parser.add_argument('--split', choices=['test', 'val2014'],
+                            default='test',
+                            help='name of split')
         parser.add_argument('--input_size', type=int, default=224,
                             help='CNN image input size')
         parser.add_argument('--gpu', type=int, nargs='*', default=None,
@@ -126,6 +150,8 @@ if __name__ == '__main__':
                                  args.checkpoint_path,
                                  arch=args.arch,
                                  dataset=args.dataset,
+                                 ann_dir=args.ann_dir,
+                                 split=args.split,
                                  input_size=args.input_size)
     except:
         traceback.print_exc(file=sys.stdout)
