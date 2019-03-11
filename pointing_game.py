@@ -156,7 +156,7 @@ def pointing_game(data_dir,
                   smooth_sigma=0.,
                   final_gap_layer=False,
                   debug=False,
-                  print_iter=25,
+                  print_iter=1,
                   eps=1e-6):
     """
     Play the pointing game using a finetuned model and visualization method.
@@ -221,7 +221,7 @@ def pointing_game(data_dir,
         assert(weights.shape[2] == 1 and weights.shape[3] == 1)
     elif vis_method == 'rise':
         explainer = RISE(model, (input_size, input_size), gpu_batch=100)
-        explainer.generate_masks(N=6000, s=8, p1=0.1)
+        explainer.generate_masks(N=4000, s=7, p1=0.5)
 
     # Prepare data augmentation.
     assert(isinstance(input_size, int))

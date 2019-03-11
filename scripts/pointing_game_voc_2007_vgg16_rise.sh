@@ -4,7 +4,7 @@ dataset="voc_2007"
 arch="vgg16"
 vis_method="rise"
 checkpoint_path="/scratch/shared/slow/ruthfong/pointing_game/${dataset}_${arch}_checkpoint_best.pth.tar"
-gpu=3
+gpu=1
 final_gap_layer=1
 
 # Keep these hyper-parameters.
