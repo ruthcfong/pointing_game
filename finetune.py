@@ -371,13 +371,16 @@ if __name__ == '__main__':
         parser.add_argument('--arch', type=str, default='vgg16',
                             help='name of CNN architecture (choose from '
                                  'PyTorch pretrained networks')
-        parser.add_argument('--dataset', choices=['voc_2007', 'coco_2014'],
+        parser.add_argument('--dataset',
+                            choices=['voc_2007', 'coco_2014', 'coco_2017'],
                             default='voc_2007',
                             help='name of dataset')
-        parser.add_argument('--train_split', choices=['train', 'train2014'],
+        parser.add_argument('--train_split',
+                            choices=['train', 'train2014', 'train2017'],
                             type=str, default='train',
                             help='name of training split')
-        parser.add_argument('--val_split', choices=['val', 'val2014'],
+        parser.add_argument('--val_split',
+                            choices=['val', 'val2014', 'val2017'],
                             type=str, default='val',
                             help='name of validation split')
         parser.add_argument('--input_size', type=int, default=224,
