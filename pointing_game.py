@@ -144,12 +144,35 @@ class SimpleResize(object):
         return new_x
 
 
+def voc_ap(rec, prec):
+    """Given ordered recall and precision lists, returns average precision."""
+    rec.insert(0, 0.0)
+    rec.append(1.0)
+    mrec = rec[:]
+    prec.insert(0, 0.0)
+    prec.append(0.0)
+    mpre = prec[:]
+    for i in range(len(mpre) - 2, -1, -1):
+        mpre[i] = max(mpre[i], mpre[i + 1])
+
+    i_list = []
+    for i in range(1, len(mrec)):
+        if mrec[i] != mrec[i - 1]:
+            i_list.append(i)
+    ap = 0.0
+    for i in i_list:
+        ap += ((mrec[i] - mrec[i - 1]) * mpre[i])
+    return ap
+
+
 def pointing_game(data_dir,
                   checkpoint_path,
                   arch='vgg16',
                   dataset='voc_2007',
                   ann_dir=None,
                   split='test',
+                  metric='pointing',
+                  threshold_type='mean',
                   input_size=224,
                   vis_method='gradient',
                   tolerance=0,
@@ -157,6 +180,7 @@ def pointing_game(data_dir,
                   final_gap_layer=False,
                   debug=False,
                   print_iter=1,
+                  alpha=0.5,
                   eps=1e-6):
     """
     Play the pointing game using a finetuned model and visualization method.
@@ -271,8 +295,12 @@ def pointing_game(data_dir,
     loader = torch.utils.data.DataLoader(dset, batch_size=1, shuffle=False)
 
     # Prepare to evaluate pointing game.
-    hits = np.zeros(num_classes)
-    misses = np.zeros(num_classes)
+    if metric == 'pointing':
+        hits = np.zeros(num_classes)
+        misses = np.zeros(num_classes)
+    elif metric == 'average_precision':
+        sum_precs = np.zeros(num_classes)
+        num_examples = np.zeros(num_classes)
     start = time.time()
     for i, (x, y) in enumerate(loader):
         # Verify shape.
@@ -329,28 +357,83 @@ def pointing_game(data_dir,
         for c in class_idx:
             # Check if maximum point for class-specific visualization is
             # within one of the bounding boxes for that class.
-            max_i = torch.argmax(vis[c])
-            if y[0,c,:,:].view(-1)[max_i] > 0.5:
-                hits[c] += 1
+            if metric == 'pointing':
+                max_i = torch.argmax(vis[c])
+                if y[0,c,:,:].view(-1)[max_i] > 0.5:
+                    hits[c] += 1
+                else:
+                    misses[c] += 1
+            elif metric == 'average_precision':
+                # Flatten visualization and ground truth data.
+                vis_flat = vis[c].reshape(-1).cpu()
+                y_flat = y[0,c].reshape(-1).float()
+                assert(vis_flat.shape == y_flat.shape)
+
+                # Binarize visualization.
+                if threshold_type == 'mean':
+                    threshold = alpha*torch.mean(vis_flat)
+                    binary_vis = vis_flat >= threshold
+                elif threshold_type == 'min_max_diff':
+                    threshold = alpha * (vis_flat.max() - vis_flat.min())
+                    vis_flat = vis_flat - vis_flat.min()
+                    binary_vis = vis_flat >= threshold
+                elif threshold_type == 'energy':
+                    assert(False)
+                    sorted_idx = torch.argsort(vis_flat, descending=True)
+                    tot_energy = vis_flat.sum()
+                    vis_cum = torch.cumsum(vis_flat[sorted_idx])
+                    threshold = alpha * tot_energy
+                    idx = torch.where(vis_cum >= threshold)
+                    binary_vis = torch.ones_like(vis_flat)
+                    binary_vis[sorted_idx[idx:]] = 0
+                else:
+                    assert(False)
+
+                # Compute average precision for the image.
+                tp = ((binary_vis == 1) & (y_flat == 1)).float()
+                sorted_idx = torch.argsort(vis_flat, descending=True)[::10]
+                prec = list((torch.cumsum(tp[sorted_idx], 0) /
+                             torch.cumsum(y_flat[sorted_idx], 0)).data.numpy())
+                rec = list((torch.cumsum(tp[sorted_idx], 0) /
+                            torch.sum(y_flat[sorted_idx])).data.numpy())
+
+                sum_precs[c] += voc_ap(rec, prec)
+                num_examples[c] += 1
             else:
-                misses[c] += 1
+                assert(False)
+
+
 
         if i % print_iter == 0:
-            avg_acc = np.mean(hits / (hits + misses + eps))
-            print('[%d/%d] Avg Acc: %.4f Time: %.2f' % (i,
-                                                        len(loader),
-                                                        avg_acc,
-                                                        time.time() - start))
+            if metric == 'pointing':
+                running_avg = np.mean(hits / (hits + misses + eps))
+                metric_name = 'Avg Acc'
+            elif metric == 'average_precision':
+                running_avg = np.mean(sum_precs / (num_examples + eps))
+                metric_name = 'Mean Avg Prec'
+            print('[%d/%d] %s: %.4f Time: %.2f' % (i,
+                                                   len(loader),
+                                                   metric_name,
+                                                   running_avg,
+                                                   time.time() - start))
             start = time.time()
             if debug:
                 viz.image(vutils.make_grid(x[0].unsqueeze(0), normalize=True),
                           0)
                 viz.image(vutils.make_grid(vis, normalize=True), 1)
 
-    acc = hits / (hits + misses)
-    avg_acc = np.mean(acc)
-    print('Avg Acc: %.4f' % avg_acc)
-    return avg_acc, acc
+    if metric == 'pointing':
+        acc = hits / (hits + misses)
+        avg_acc = np.mean(acc)
+        print('Avg Acc: %.4f' % avg_acc)
+        print(acc)
+        return avg_acc, acc
+    elif metric == 'average_precision':
+        class_mean_avg_prec = sum_precs / num_examples
+        mean_avg_prec = np.mean(class_mean_avg_prec)
+        print('Mean Avg Prec: %.4f' % mean_avg_prec)
+        print(class_mean_avg_prec)
+        return mean_avg_prec, class_mean_avg_prec
 
 
 if __name__ == '__main__':
@@ -369,13 +452,15 @@ if __name__ == '__main__':
         parser.add_argument('--arch', type=str, default='vgg16',
                             help='name of CNN architecture (choose from '
                                  'PyTorch pretrained networks')
-        parser.add_argument('--dataset', choices=['voc_2007', 'coco_2014'],
+        parser.add_argument('--dataset',
+                            choices=['voc_2007', 'coco_2014', 'coco_2017'],
                             default='voc_2007',
                             help='name of dataset')
         parser.add_argument('--ann_dir', type=str, default=None,
                             help='path to root directory containing '
                                  'annotation files (for COCO).')
-        parser.add_argument('--split', type=str, choices=['test', 'val2014'],
+        parser.add_argument('--split', type=str,
+                            choices=['test', 'val2014', 'val2017'],
                             default='test',
                             help='name of split to use')
         parser.add_argument('--input_size', type=int, default=224,
@@ -394,6 +479,13 @@ if __name__ == '__main__':
         parser.add_argument('--gpu', type=int, nargs='*', default=None,
                             help='List of GPU(s) to use.')
         parser.add_argument('--debug', type='bool', default=False)
+        parser.add_argument('--metric', type=str, choices=['pointing',
+                                                           'average_precision'],
+                            default='pointing')
+        parser.add_argument('--threshold_type', type=str,
+                            choices=['mean', 'min_max_diff', 'energy'],
+                            default='mean')
+        parser.add_argument('--alpha', type=float, default=0.5)
 
         args = parser.parse_args()
         set_gpu(args.gpu)
@@ -403,11 +495,13 @@ if __name__ == '__main__':
                       dataset=args.dataset,
                       ann_dir=args.ann_dir,
                       split=args.split,
+                      metric=args.metric,
                       input_size=args.input_size,
                       vis_method=args.vis_method,
                       tolerance=args.tolerance,
                       smooth_sigma=args.smooth_sigma,
                       final_gap_layer=args.final_gap_layer,
+                      alpha=args.alpha,
                       debug=args.debug)
     except:
         traceback.print_exc(file=sys.stdout)
