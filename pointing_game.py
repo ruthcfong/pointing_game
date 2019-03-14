@@ -12,10 +12,12 @@ import time
 import cv2
 import numpy as np
 
-from PIL import ImageFile
+from PIL import ImageFile, Image
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 from skimage.transform import resize
+
+from sklearn.metrics import average_precision_score
 
 import torch
 import torch.nn as nn
@@ -29,6 +31,22 @@ from utils import (get_finetune_model, VOC_CLASSES, SimpleToTensor, get_device,
                    set_gpu, blur_input_tensor, register_hook_on_module,
                    hook_get_acts, str2bool, COCO_CATEGORY_IDS, RISE,
                    create_dir_if_necessary)
+
+
+class RGBtoBGR(object):
+    """Convert image from RGB to BGR."""
+    def __call__(self, img):
+        assert(isinstance(img, Image.Image))
+        assert(img.mode == 'RGB')
+        r, g, b = img.split()
+        rgb_arr = np.asarray(img)
+        assert(rgb_arr.ndim == 3)
+        assert(rgb_arr.shape[2] == 3)
+        bgr_arr = np.roll(rgb_arr, 1, axis=-1)
+        assert(np.all(bgr_arr[:,:,0] == b))
+        assert(np.all(bgr_arr[:,:,1] == g))
+        assert(np.all(bgr_arr[:,:,2] == r))
+        return bgr_arr.astype(np.float32)
 
 
 class FromCocoToDenseSegmentationMasks(object):
@@ -145,36 +163,15 @@ class SimpleResize(object):
         return new_x
 
 
-def voc_ap(rec, prec):
-    """Given ordered recall and precision lists, returns average precision."""
-    rec.insert(0, 0.0)
-    rec.append(1.0)
-    mrec = rec[:]
-    prec.insert(0, 0.0)
-    prec.append(0.0)
-    mpre = prec[:]
-    for i in range(len(mpre) - 2, -1, -1):
-        mpre[i] = max(mpre[i], mpre[i + 1])
-
-    i_list = []
-    for i in range(1, len(mrec)):
-        if mrec[i] != mrec[i - 1]:
-            i_list.append(i)
-    ap = 0.0
-    for i in i_list:
-        ap += ((mrec[i] - mrec[i - 1]) * mpre[i])
-    return ap
-
-
 def pointing_game(data_dir,
                   checkpoint_path,
                   out_path=None,
                   arch='vgg16',
+                  use_caffe=False,
                   dataset='voc_2007',
                   ann_dir=None,
                   split='test',
                   metric='pointing',
-                  threshold_type='mean',
                   input_size=224,
                   vis_method='gradient',
                   tolerance=0,
@@ -182,7 +179,6 @@ def pointing_game(data_dir,
                   final_gap_layer=False,
                   debug=False,
                   print_iter=1,
-                  alpha=0.5,
                   eps=1e-6):
     """
     Play the pointing game using a finetuned model and visualization method.
@@ -251,13 +247,22 @@ def pointing_game(data_dir,
 
     # Prepare data augmentation.
     assert(isinstance(input_size, int))
-    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                     std=[0.229, 0.224, 0.225])
-    transform = transforms.Compose([
-        transforms.Resize(input_size),
-        transforms.ToTensor(),
-        normalize,
-    ])
+    if use_caffe:
+        transform = transforms.Compose([
+            transforms.Resize(input_size),
+            RGBtoBGR,
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[104.01, 116.67, 122.68],
+                                 std=[1., 1., 1.]),
+        ])
+    else:
+        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                         std=[0.229, 0.224, 0.225])
+        transform = transforms.Compose([
+            transforms.Resize(input_size),
+            transforms.ToTensor(),
+            normalize,
+        ])
 
     if 'voc' in dataset:
         target_transform = transforms.Compose([
@@ -373,45 +378,16 @@ def pointing_game(data_dir,
                         records[i,c] = -1
             elif metric == 'average_precision':
                 # Flatten visualization and ground truth data.
-                vis_flat = vis[c].reshape(-1).cpu()
                 y_flat = y[0,c].reshape(-1).float()
-                assert(vis_flat.shape == y_flat.shape)
-
-                # Binarize visualization.
-                if threshold_type == 'mean':
-                    threshold = alpha*torch.mean(vis_flat)
-                    binary_vis = vis_flat >= threshold
-                elif threshold_type == 'min_max_diff':
-                    threshold = alpha * (vis_flat.max() - vis_flat.min())
-                    vis_flat = vis_flat - vis_flat.min()
-                    binary_vis = vis_flat >= threshold
-                elif threshold_type == 'energy':
-                    assert(False)
-                    sorted_idx = torch.argsort(vis_flat, descending=True)
-                    tot_energy = vis_flat.sum()
-                    vis_cum = torch.cumsum(vis_flat[sorted_idx])
-                    threshold = alpha * tot_energy
-                    idx = torch.where(vis_cum >= threshold)
-                    binary_vis = torch.ones_like(vis_flat)
-                    binary_vis[sorted_idx[idx:]] = 0
-                else:
-                    assert(False)
-
-                # Compute average precision for the image.
-                tp = ((binary_vis == 1) & (y_flat == 1)).float().data.numpy()
-                fp = ((binary_vis == 1) & (y_flat == 0)).float().data.numpy()
-                pos_area = np.sum(y_flat.data.numpy())
-                sorted_idx = torch.argsort(vis_flat, descending=True).data.numpy()
-                tp_cum = np.cumsum(tp[sorted_idx])
-                fp_cum = np.cumsum(fp[sorted_idx])
-                rec = [tp_cum[j] / pos_area for j in range(len(tp))]
-                prec = [tp_cum[j] / (tp_cum[j] + fp_cum[j] + eps) for j in range(len(tp))]
-
-                ap = voc_ap(rec, prec)
+                vis_flat = vis[c].reshape(-1).cpu().data.numpy()
+                ap = average_precision_score(y_flat, vis_flat)
                 sum_precs[c] += ap
                 num_examples[c] += 1
                 if out_path is not None:
                     records[i,c] = ap
+                if debug:
+                    viz.image(vutils.make_grid(x, normalize=True), win=0)
+                    viz.image(vutils.make_grid(vis[c], normalize=True), win=1)
             else:
                 assert(False)
 
@@ -429,9 +405,10 @@ def pointing_game(data_dir,
                                                    time.time() - start))
             start = time.time()
             if debug:
-                viz.image(vutils.make_grid(x[0].unsqueeze(0), normalize=True),
-                          0)
-                viz.image(vutils.make_grid(vis, normalize=True), 1)
+                pass
+                # viz.image(vutils.make_grid(x[0].unsqueeze(0), normalize=True),
+                #           0)
+                # viz.image(vutils.make_grid(vis, normalize=True), 1)
 
     if out_path is not None:
         create_dir_if_necessary(out_path)
@@ -554,46 +531,25 @@ if __name__ == '__main__':
         parser.add_argument('--metric', type=str, choices=['pointing',
                                                            'average_precision'],
                             default='pointing')
-        parser.add_argument('--threshold_type', type=str,
-                            choices=['mean', 'min_max_diff', 'energy'],
-                            default='mean')
         parser.add_argument('--out_path', type=str, default=None)
-        parser.add_argument('--alpha', type=float, default=0.5)
-        parser.add_argument('--find_best_alpha', action='store_true')
 
         args = parser.parse_args()
         set_gpu(args.gpu)
-        if args.find_best_alpha:
-            assert(args.metric == 'average_precision')
-            find_best_alpha(args.data_dir,
-                            args.checkpoint_path,
-                            out_prefix=args.out_path,
-                            arch=args.arch,
-                            dataset=args.dataset,
-                            ann_dir=args.ann_dir,
-                            split=args.split,
-                            threshold_type=args.threshold_type,
-                            input_size=args.input_size,
-                            vis_method=args.vis_method,
-                            tolerance=args.tolerance,
-                            smooth_sigma=args.smooth_sigma,
-                            final_gap_layer=args.final_gap_layer)
-        else:
-            pointing_game(args.data_dir,
-                          args.checkpoint_path,
-                          out_path=args.out_path,
-                          arch=args.arch,
-                          dataset=args.dataset,
-                          ann_dir=args.ann_dir,
-                          split=args.split,
-                          metric=args.metric,
-                          input_size=args.input_size,
-                          vis_method=args.vis_method,
-                          tolerance=args.tolerance,
-                          smooth_sigma=args.smooth_sigma,
-                          final_gap_layer=args.final_gap_layer,
-                          alpha=args.alpha,
-                          debug=args.debug)
+
+        pointing_game(args.data_dir,
+                      args.checkpoint_path,
+                      out_path=args.out_path,
+                      arch=args.arch,
+                      dataset=args.dataset,
+                      ann_dir=args.ann_dir,
+                      split=args.split,
+                      metric=args.metric,
+                      input_size=args.input_size,
+                      vis_method=args.vis_method,
+                      tolerance=args.tolerance,
+                      smooth_sigma=args.smooth_sigma,
+                      final_gap_layer=args.final_gap_layer,
+                      debug=args.debug)
     except:
         traceback.print_exc(file=sys.stdout)
         sys.exit(1)
