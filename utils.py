@@ -257,10 +257,10 @@ def get_finetune_model(arch='vgg16',
         googlenet = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(googlenet)
 
-        model = googlenet.googlenet(pretrained=True, transform_input=False)
+        model = googlenet.googlenet(pretrained=checkpoint_path is None, transform_input=False)
         model.aux_logits = False
     else:
-        model = models.__dict__[arch](pretrained=True)
+        model = models.__dict__[arch](pretrained=checkpoint_path is None)
     if arch == 'inception_v3':
         model.aux_logits = False
 
