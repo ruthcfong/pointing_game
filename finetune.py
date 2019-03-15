@@ -18,7 +18,8 @@ from torchvision import datasets, models, transforms
 
 from utils import (set_gpu, get_device, create_dir_if_necessary,
                    get_finetune_model, SimpleToTensor, str2bool,
-                   FromVOCToOneHotEncoding, FromCocoToOneHotEncoding)
+                   FromVOCToOneHotEncoding, FromCocoToOneHotEncoding,
+                   GoogLeNetNormalize)
 
 
 class AverageMeter(object):
@@ -224,8 +225,12 @@ def finetune(data_dir,
     model = get_finetune_model(arch=arch, dataset=dataset)
 
     # Prepare data augmentation.
-    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                     std=[0.229, 0.224, 0.225])
+    # Use caffe normalization for GoogLeNet.
+    if arch == 'googlenet':
+        normalize = GoogLeNetNormalize()
+    else:
+        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                         std=[0.229, 0.224, 0.225])
 
     train_transform = transforms.Compose([
         transforms.Resize(256),

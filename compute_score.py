@@ -38,13 +38,15 @@ def compute_metric(records, metric='pointing', idx=None):
         acc = hits / (hits + misses)
         avg_acc = np.mean(acc)
         print('Avg Acc: %.4f' % avg_acc)
-        print(acc)
+        for c in range(len(acc)):
+            print(acc[c])
         return acc, avg_acc
     elif metric == 'average_precision':
         class_mean_avg_prec = sum_precs / num_examples
         mean_avg_prec = np.mean(class_mean_avg_prec)
         print('Mean Avg Prec: %.4f' % mean_avg_prec)
-        print(class_mean_avg_prec)
+        for c in range(len(class_mean_avg_prec)):
+            print(class_mean_avg_prec[c])
         return class_mean_avg_prec, mean_avg_prec
     else:
         assert(False)

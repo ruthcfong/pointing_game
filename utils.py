@@ -49,35 +49,37 @@ class RISE(nn.Module):
     def __init__(self, model, input_size, gpu_batch=100):
         super(RISE, self).__init__()
         self.model = model
+        assert(isinstance(input_size, int))
         self.input_size = input_size
         self.gpu_batch = gpu_batch
+        self.sigmoid = nn.Sigmoid()
 
     def generate_masks(self, N, s, p1, savepath='masks.npy'):
-        cell_size = np.ceil(np.array(self.input_size) / s)
+        cell_size = np.ceil(self.input_size / s)
         up_size = (s + 1) * cell_size
 
         grid = np.random.rand(N, s, s) < p1
-        grid = grid.astype('float32')
+        grid = grid.astype(np.float32)
 
-        self.masks = np.empty((N, *self.input_size))
+        self.masks = np.empty((N, self.input_size, self.input_size))
 
         for i in tqdm(range(N), desc='Generating filters'):
             # Random shifts
-            x = np.random.randint(0, cell_size[0])
-            y = np.random.randint(0, cell_size[1])
+            x, y = np.random.randint(0, cell_size, 2)
             # Linear upsampling and cropping
-            self.masks[i, :, :] = resize(grid[i], up_size, order=1,
+            self.masks[i, :, :] = resize(grid[i],
+                                         (up_size, up_size),
+                                         order=1,
                                          mode='reflect',
-                                         anti_aliasing=False)[x:x + self.input_size[0], y:y + self.input_size[1]]
-        self.masks = self.masks.reshape(-1, 1, *self.input_size)
+                                         anti_aliasing=False)[x:x + self.input_size, y:y + self.input_size]
+        self.masks = self.masks.reshape(-1, 1, self.input_size, self.input_size)
         np.save(savepath, self.masks)
         self.masks = torch.from_numpy(self.masks).float()
         self.N = N
-        self.p1 = p1
 
-    def load_masks(self, filepath):
-        self.masks = np.load(filepath)
-        self.masks = torch.from_numpy(self.masks).float()
+    def load_masks(self, filepath='masks.npy'):
+        masks_np = np.load(filepath)
+        self.masks = torch.from_numpy(masks_np).float()
         self.N = self.masks.shape[0]
 
     def update_input_size(self, input_size):
@@ -96,28 +98,27 @@ class RISE(nn.Module):
         N = self.N
         _, _, H, W = x.size()
 
-        # Apply array of filters to the image.
-        # stack = torch.mul(self.masks, x.data)
-
         p = []
         for i in range(0, N, self.gpu_batch):
             x_new = torch.mul(self.masks[i:min(i + self.gpu_batch, N)],
                               x.cpu().data).cuda()
-            p.append(self.model(x_new).cpu())
-            torch.cuda.empty_cache()
+            p.append(self.sigmoid(self.model(x_new)).cpu())
         p = torch.cat(p)
 
         # Number of classes.
         CL = p.size(1)
+
         if len(p.shape) == 4:
             assert(p.shape[2] == 1)
             assert(p.shape[3] == 1)
             p = p[:,:,0,0]
 
+        assert(len(p.shape) == 2)
+
         sal = torch.matmul(p.data.transpose(0, 1),
                            self.masks.view(N, H * W))
         sal = sal.view((CL, H, W))
-        sal = sal / N / self.p1
+        sal = sal / N
         return sal
 
 
@@ -227,13 +228,39 @@ class SimpleToTensor(object):
         return torch.from_numpy(x)
 
 
+class GoogLeNetNormalize(object):
+    """Preprocess input as done in caffe for GoogLeNet."""
+    def __call__(self, x):
+        assert(len(x.shape) == 3)
+        x_ch0 = torch.unsqueeze(x[0], 0) * (0.229 / 0.5) + (0.485 - 0.5) / 0.5
+        x_ch1 = torch.unsqueeze(x[1], 0) * (0.224 / 0.5) + (0.456 - 0.5) / 0.5
+        x_ch2 = torch.unsqueeze(x[2], 0) * (0.225 / 0.5) + (0.406 - 0.5) / 0.5
+        x = torch.cat((x_ch0, x_ch1, x_ch2), 0)
+        return x
+
+
 def get_finetune_model(arch='vgg16',
                        dataset='voc_2007',
                        checkpoint_path=None,
                        convert_to_fully_convolutional=False,
-                       final_gap_layer=False):
+                       final_gap_layer=False,
+                       converted_caffe=False,
+                       torchvision_path='/users/ruthfong/pytorch/vision'):
     # Load pre-trained model.
-    model = models.__dict__[arch](pretrained=True)
+    # Handle GoogLeNet specially because it's not in the stable release of torchvision yet.
+    if arch == 'googlenet':
+        import importlib.util
+        googlenet_path = os.path.join(torchvision_path,
+                                      'torchvision/models/googlenet.py')
+        spec = importlib.util.spec_from_file_location('googlenet',
+                                                      googlenet_path)
+        googlenet = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(googlenet)
+
+        model = googlenet.googlenet(pretrained=True, transform_input=False)
+        model.aux_logits = False
+    else:
+        model = models.__dict__[arch](pretrained=True)
     if arch == 'inception_v3':
         model.aux_logits = False
 
@@ -266,7 +293,34 @@ def get_finetune_model(arch='vgg16',
     # Load weights, if provided.
     if checkpoint_path is not None:
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
-        model.load_state_dict(checkpoint['state_dict'])
+        if converted_caffe:
+            if 'vgg' in arch:
+                classifier_keys = [k for k in checkpoint.keys()
+                                   if 'classifier' in k]
+                index_remapping = {0:0, 2:3, 4:6}
+                for k in classifier_keys:
+                    # Get original key.
+                    parent_module, index, weight_name = k.split('.')
+                    new_index = str(index_remapping[int(index)])
+                    new_k = '.'.join([parent_module, new_index, weight_name])
+
+                    # Reshape weights if necessary.
+                    weights = checkpoint[k]
+                    if weight_name == 'weight':
+                        checkpoint[new_k] = weights.reshape(weights.shape[0], -1)
+                    elif weight_name == 'bias':
+                        checkpoint[new_k] = weights
+                    else:
+                        assert(False)
+
+                    # Delete old key-value pair.
+                    if new_k != k:
+                        del checkpoint[k]
+            else:
+                assert(False)
+            model.load_state_dict(checkpoint)
+        else:
+            model.load_state_dict(checkpoint['state_dict'])
 
     # Convert model to fully convolutional one.
     if convert_to_fully_convolutional:
