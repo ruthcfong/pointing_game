@@ -294,7 +294,7 @@ def get_finetune_model(arch='vgg16',
     if checkpoint_path is not None:
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
         if converted_caffe:
-            if 'vgg' in arch:
+            if arch == 'vgg16':
                 classifier_keys = [k for k in checkpoint.keys()
                                    if 'classifier' in k]
                 index_remapping = {0:0, 2:3, 4:6}
@@ -316,7 +316,7 @@ def get_finetune_model(arch='vgg16',
                     # Delete old key-value pair.
                     if new_k != k:
                         del checkpoint[k]
-            else:
+            elif arch == 'resnet50':
                 assert(False)
             model.load_state_dict(checkpoint)
         else:
