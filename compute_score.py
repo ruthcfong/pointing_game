@@ -17,6 +17,7 @@ def compute_metric(records, metric='pointing', idx=None):
     else:
         assert(False)
 
+    count = 0
     for i in range(len(example_idx)):
         j = example_idx[i]
         c = class_idx[i]
@@ -27,12 +28,13 @@ def compute_metric(records, metric='pointing', idx=None):
             elif rec == -1:
                 misses[c] += 1
             else:
-                assert(False)
+                count += 1
         elif metric == 'average_precision':
             sum_precs[c] += rec
             num_examples[c] += 1
         else:
             assert(False)
+    print(count)
 
     if metric == 'pointing':
         acc = hits / (hits + misses)
