@@ -25,6 +25,8 @@ import torch.nn as nn
 from torchvision import datasets, models, transforms
 import torchvision.utils as vutils
 
+import tqdm
+
 import visdom
 
 from utils import (get_finetune_model, VOC_CLASSES, SimpleToTensor, get_device,
@@ -32,6 +34,7 @@ from utils import (get_finetune_model, VOC_CLASSES, SimpleToTensor, get_device,
                    hook_get_acts, str2bool, COCO_CATEGORY_IDS, RISE,
                    create_dir_if_necessary, get_pytorch_module)
 
+MAX_GPU_LENGTH = 500
 
 class NumpyToTensor(object):
     def __call__(self, img):
@@ -180,6 +183,7 @@ def pointing_game(data_dir,
                   checkpoint_path,
                   out_path=None,
                   save_dir=None,
+                  load_from_save_dir=False,
                   arch='vgg16',
                   converted_caffe=False,
                   dataset='voc_2007',
@@ -193,6 +197,7 @@ def pointing_game(data_dir,
                   final_gap_layer=False,
                   debug=False,
                   print_iter=1,
+                  save_iter=25,
                   start_index=-1,
                   end_index=-1,
                   eps=1e-6):
@@ -235,7 +240,12 @@ def pointing_game(data_dir,
                                convert_to_fully_convolutional=True,
                                final_gap_layer=final_gap_layer)
 
+    # Handle large images on CPU.
+    cpu_device = torch.device('cpu')
+
+    # Handle all other images on GPU, if available.
     device = get_device()
+
     model = model.to(device)
 
     # 'guided_backprop' as in Springenberg et al., ICLR Workshop 2015.
@@ -346,7 +356,6 @@ def pointing_game(data_dir,
         dset = torch.utils.data.Subset(dset, idx)
     else:
         start_index = 0
-        end_index = len(dset)
 
     loader = torch.utils.data.DataLoader(dset, batch_size=1, shuffle=False)
 
@@ -362,8 +371,9 @@ def pointing_game(data_dir,
     elif metric == 'average_precision':
         sum_precs = np.zeros(num_classes)
         num_examples = np.zeros(num_classes)
-    start = time.time()
-    for i, (x, y) in enumerate(loader):
+
+    t_loop = tqdm.tqdm(loader)
+    for i, (x, y) in enumerate(t_loop):
         # Verify shape.
         assert(x.shape[0] == 1)
         assert(y.shape[0] == 1)
@@ -374,8 +384,14 @@ def pointing_game(data_dir,
         if vis_method != 'rise':
             # Set input batch size to the number of classes.
             x = x.expand(num_classes, *x.shape[1:])
-            x.requires_grad = True
 
+            # Handle large images on CPU.
+            if np.max(x.shape[2:]) > MAX_GPU_LENGTH:
+                print(f'Using CPU to handle image {i+start_index} with shape {x.shape[2:]}.')
+                x = x.to(cpu_device)
+                model.to(cpu_device)
+
+            x.requires_grad = True
             model.zero_grad()
             pred_y = model(x)
 
@@ -385,7 +401,7 @@ def pointing_game(data_dir,
 
             # Prepare gradient.
             weights = torch.zeros_like(pred_y)
-            labels = torch.arange(0, num_classes).to(device)
+            labels = torch.arange(0, num_classes).to(pred_y.device)
             labels = labels[:, None, None, None]
             labels_shape = (num_classes, 1, weights.shape[2], weights.shape[3])
             labels = labels.expand(*labels_shape)
@@ -401,14 +417,15 @@ def pointing_game(data_dir,
                                         sigma=smooth_sigma*max(vis.shape[2:]))
         elif vis_method == 'cam':
             acts = hook_get_acts(model, layer_names, x)[0]
-            vis_lowres = torch.mean(acts * weights, 1, keepdim=True)
+            vis_lowres = torch.mean(acts * weights.to(acts.device), 1,
+                                    keepdim=True)
             vis = nn.functional.interpolate(vis_lowres,
                                             size=y.shape[2:],
                                             mode='bilinear')
         elif vis_method == 'grad_cam':
             # Prepare gradient.
             weights = torch.zeros_like(pred_y)
-            labels = torch.arange(0, num_classes).to(device)
+            labels = torch.arange(0, num_classes).to(pred_y.device)
             labels = labels[:, None, None, None]
             labels_shape = (num_classes, 1, weights.shape[2], weights.shape[3])
             labels = labels.expand(*labels_shape)
@@ -439,16 +456,33 @@ def pointing_game(data_dir,
                                             mode='bilinear')
 
         elif vis_method == 'rise':
-            vis = explainer(x)
-            vis = vis.unsqueeze(1)
-            # Upsample visualization to image size.
-            vis = nn.functional.interpolate(vis,
-                                            size=y.shape[2:],
-                                            mode='bilinear')
+            if load_from_save_dir:
+                try:
+                    vis = torch.load(os.path.join(save_dir, f'{i+start_index:06d}.pth'))
+                except:
+                    vis = explainer(x)
+                    vis = vis.unsqueeze(1)
+                    # Upsample visualization to image size.
+                    vis = nn.functional.interpolate(vis,
+                                                    size=y.shape[2:],
+                                                    mode='bilinear')
+                    torch.save(vis, os.path.join(save_dir, f'{i+start_index:06d}.pth'))
+
+            else:
+                vis = explainer(x)
+                vis = vis.unsqueeze(1)
+                # Upsample visualization to image size.
+                vis = nn.functional.interpolate(vis,
+                                                size=y.shape[2:],
+                                                mode='bilinear')
         else:
             assert(False)
 
-        if save_dir is not None:
+        # Move model back to GPU.
+        if np.max(x.shape[2:]) > MAX_GPU_LENGTH:
+            model.to(device)
+
+        if save_dir is not None and not load_from_save_dir:
             torch.save(vis, os.path.join(save_dir, f'{i+start_index:06d}.pth'))
 
         # Get present classes in the image.
@@ -489,17 +523,15 @@ def pointing_game(data_dir,
             elif metric == 'average_precision':
                 running_avg = np.mean(sum_precs / (num_examples + eps))
                 metric_name = 'Mean Avg Prec'
-            print('[%d/%d] %s: %.4f Time: %.2f' % (i,
-                                                   len(loader),
-                                                   metric_name,
-                                                   running_avg,
-                                                   time.time() - start))
-            start = time.time()
+            t_loop.set_description(f'{metric_name} {running_avg:.4f}')
             if debug:
                 pass
                 # viz.image(vutils.make_grid(x[0].unsqueeze(0), normalize=True),
                 #           0)
                 # viz.image(vutils.make_grid(vis, normalize=True), 1)
+        if i % save_iter == 0 and out_path is not None:
+            create_dir_if_necessary(out_path)
+            np.savetxt(out_path, records)
 
     if out_path is not None:
         create_dir_if_necessary(out_path)
@@ -627,6 +659,7 @@ if __name__ == '__main__':
         parser.add_argument('--save_dir', type=str, default=None)
         parser.add_argument('--start_index', type=int, default=-1)
         parser.add_argument('--end_index', type=int, default=-1)
+        parser.add_argument('--load_from_save_dir', type='bool', default=False)
 
         args = parser.parse_args()
         set_gpu(args.gpu)
@@ -635,6 +668,7 @@ if __name__ == '__main__':
                       args.checkpoint_path,
                       out_path=args.out_path,
                       save_dir=args.save_dir,
+                      load_from_save_dir=args.load_from_save_dir,
                       arch=args.arch,
                       converted_caffe=args.converted_caffe,
                       dataset=args.dataset,
