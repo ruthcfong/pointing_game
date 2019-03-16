@@ -382,11 +382,27 @@ def make_fully_convolutional(model, final_gap_layer=False):
         })
 
         new_model_layers.append(first_conv)
+    elif type(model).__name__ == 'GoogLeNet':
+        # Exclude InceptionAux, dropout, and last FC layer.
+        new_model_layers = [m for m in list(model.children())[:-2]
+                            if type(m).__name__ != 'InceptionAux']
+
+        first_fc = model.fc.state_dict()
+        out_ch, in_ch = first_fc['weight'].shape
+        first_conv = nn.Conv2d(in_ch, out_ch, (1, 1))
+        first_conv.load_state_dict({
+            'weight': first_fc['weight'].view(out_ch, in_ch, 1, 1),
+            'bias': first_fc['bias']
+        })
+
+        new_model_layers.append(first_conv)
     else:
         assert(False)
 
     # Add final global average pooling layer.
-    if final_gap_layer and not isinstance(model, models.ResNet):
+    if (final_gap_layer
+        and not isinstance(model, models.ResNet)
+        and not type(model).__name__ == 'GoogLeNet'):
         new_model_layers.append(nn.AdaptiveAvgPool2d((1, 1)))
 
     new_model = nn.Sequential(*new_model_layers)
