@@ -372,6 +372,7 @@ def pointing_game(data_dir,
         sum_precs = np.zeros(num_classes)
         num_examples = np.zeros(num_classes)
 
+    using_cpu = False
     t_loop = tqdm.tqdm(loader)
     for i, (x, y) in enumerate(t_loop):
         # Verify shape.
@@ -384,16 +385,19 @@ def pointing_game(data_dir,
         if vis_method != 'rise':
             # Set input batch size to the number of classes.
             x = x.expand(num_classes, *x.shape[1:])
-
-            # Handle large images on CPU.
-            if np.max(x.shape[2:]) > MAX_GPU_LENGTH:
-                print(f'Using CPU to handle image {i+start_index} with shape {x.shape[2:]}.')
-                x = x.to(cpu_device)
-                model.to(cpu_device)
-
             x.requires_grad = True
+
             model.zero_grad()
-            pred_y = model(x)
+            try:
+                pred_y = model(x)
+            except RuntimeError:
+                using_cpu = True
+                print(f'Using CPU to handle image {i+start_index} with shape {x.shape}.')
+                # x = torch.tensor(x, device=cpu_device, requires_grad=True)
+                x = x.cpu().clone().detach().requires_grad_(True)
+                model.to(cpu_device)
+                model.zero_grad()
+                pred_y = model(x)
 
         # Play pointing game using the specified visualization method.
         # 'gradient' is Simonyan et al., ICLR Workshop 2014.
@@ -406,7 +410,25 @@ def pointing_game(data_dir,
             labels_shape = (num_classes, 1, weights.shape[2], weights.shape[3])
             labels = labels.expand(*labels_shape)
             weights.scatter_(1, labels, 1)
-            pred_y.backward(weights)
+            try:
+                pred_y.backward(weights)
+            except RuntimeError:
+                # TODO(ruthfong): Handle with less redundancy.
+                using_cpu = True
+                print(f'Using CPU to handle image {i+start_index} with shape {x.shape}.')
+                # x = torch.tensor(x, device=cpu_device, requires_grad=True)
+                x = x.cpu().clone().detach().requires_grad_(True)
+                model.to(cpu_device)
+                model.zero_grad()
+                pred_y = model(x)
+
+                weights = torch.zeros_like(pred_y)
+                labels = torch.arange(0, num_classes).to(pred_y.device)
+                labels = labels[:, None, None, None]
+                labels_shape = (num_classes, 1, weights.shape[2], weights.shape[3])
+                labels = labels.expand(*labels_shape)
+                weights.scatter_(1, labels, 1)
+                pred_y.backward(weights)
 
             # Compute gradient visualization.
             vis, _ = torch.max(torch.abs(x.grad), 1, keepdim=True)
@@ -478,9 +500,10 @@ def pointing_game(data_dir,
         else:
             assert(False)
 
-        # Move model back to GPU.
-        if np.max(x.shape[2:]) > MAX_GPU_LENGTH:
+        # Move model back to GPU if necessary.
+        if using_cpu:
             model.to(device)
+            using_cpu = False
 
         if save_dir is not None and not load_from_save_dir:
             torch.save(vis, os.path.join(save_dir, f'{i+start_index:06d}.pth'))
