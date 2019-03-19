@@ -239,6 +239,30 @@ class GoogLeNetNormalize(object):
         return x
 
 
+class VGGFullyConvolutional(nn.Module):
+    "Remove global average pooling layer from forward function."
+    def __init__(self, model):
+        self.features = self.features
+        self.classifier = self.classifier
+
+    def forward(self, x):
+        x = self.features(x)
+        x = self.classifier(x)
+        return x
+
+
+class CaffeNetWrapper(nn.Module):
+    def __init__(self, model, key):
+        self.model = model
+        self.key = key
+        self.model.verbose = False
+        self.model.phase = 'TEST'
+
+    def forward(self, x):
+        blobs = self.model(x)
+        return blobs[self.key]
+
+
 def get_finetune_model(arch='vgg16',
                        dataset='voc_2007',
                        checkpoint_path=None,
@@ -246,6 +270,21 @@ def get_finetune_model(arch='vgg16',
                        final_gap_layer=False,
                        converted_caffe=False,
                        torchvision_path='/users/ruthfong/pytorch/vision'):
+    # Set number of classes in dataset.
+    if 'voc' in dataset:
+        num_classes = 20
+    elif 'coco' in dataset:
+        num_classes = 80
+    else:
+        assert(False)
+
+    if converted_caffe and arch == 'resnet50':
+        assert checkpoint_path is not None
+        # Requires an installation of pycaffe.
+        model = torch.load(checkpoint_path)
+        model = CaffeNetWrapper(model, 'fc8')
+        return model
+
     # Load pre-trained model.
     # Handle GoogLeNet specially because it's not in the stable release of torchvision yet.
     if arch == 'googlenet':
@@ -270,14 +309,6 @@ def get_finetune_model(arch='vgg16',
 
     # Get the last layer.
     last_name, last_module = list(model.named_modules())[-1]
-
-    # Set number of classes in dataset.
-    if 'voc' in dataset:
-        num_classes = 20
-    elif 'coco' in dataset:
-        num_classes = 80
-    else:
-        assert(False)
 
     # Construct new last layer.
     if isinstance(last_module, nn.Linear):
@@ -316,7 +347,7 @@ def get_finetune_model(arch='vgg16',
                     # Delete old key-value pair.
                     if new_k != k:
                         del checkpoint[k]
-            elif arch == 'resnet50':
+            else:
                 assert(False)
             model.load_state_dict(checkpoint)
         else:
@@ -382,6 +413,7 @@ def make_fully_convolutional(model, final_gap_layer=False):
         })
 
         new_model_layers.append(first_conv)
+    # TODO(ruthfong): Handle this better once GoogLeNet is in stable release.
     elif type(model).__name__ == 'GoogLeNet':
         # Exclude InceptionAux, dropout, and last FC layer.
         new_model_layers = [m for m in list(model.children())[:-2]

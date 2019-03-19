@@ -29,12 +29,17 @@ import tqdm
 
 import visdom
 
+from caffe_transforms import get_caffe_transform
+
 from utils import (get_finetune_model, VOC_CLASSES, SimpleToTensor, get_device,
                    set_gpu, blur_input_tensor, register_hook_on_module,
                    hook_get_acts, str2bool, COCO_CATEGORY_IDS, RISE,
                    create_dir_if_necessary, get_pytorch_module)
 
+from compute_score import compute_metrics
+
 MAX_GPU_LENGTH = 500
+
 
 class NumpyToTensor(object):
     def __call__(self, img):
@@ -200,6 +205,7 @@ def pointing_game(data_dir,
                   save_iter=25,
                   start_index=-1,
                   end_index=-1,
+                  layer_name=None,
                   eps=1e-6):
     """
     Play the pointing game using a finetuned model and visualization method.
@@ -261,19 +267,33 @@ def pointing_game(data_dir,
     elif vis_method == 'cam':
         if 'resnet' in arch:
             # Get third to last layer.
-            print(list(model.children()))
             layer_name = '%d' % (len(list(model.children())) - 3)
             layer_names = [layer_name]
-        else:
-            assert(False)
+        elif 'googlenet' in arch:
+            # Get second to last layer (exclude GAP and last fc layer).
+            layer_name = '%d' % (len(list(model.children())) - 2)
+            layer_names = [layer_name]
         last_layer = list(model.children())[-1]
         assert(isinstance(last_layer, nn.Conv2d))
         weights = last_layer.state_dict()['weight']
         assert(len(weights.shape) == 4)
         assert(weights.shape[2] == 1 and weights.shape[3] == 1)
     elif vis_method == 'grad_cam':
-        if arch == 'vgg16':
-            layer_names = ['29'] # last conv layer in features (pre-pooling) (14 x 14)
+        if 'vgg16' in arch:
+            if layer_name is not None:
+                layer_names = [layer_name]
+            else:
+                layer_names = ['29'] # last conv layer in features (pre-pooling) (14 x 14)
+        elif 'resnet50' in arch:
+            if layer_name is not None:
+                layer_names = [layer_name]
+            else:
+                layer_names = ['7'] # last conv layer before GAP and FC layer.
+        elif 'googlenet' in arch:
+            if layer_name is not None:
+                layer_names = [layer_name]
+            else:
+                layer_names = ['15'] # last conv layer before GAP and FC layer.
         else:
             assert(False)
         # Prepare to get backpropagated gradient at intermediate layer.
@@ -296,13 +316,7 @@ def pointing_game(data_dir,
     else:
         resize = transforms.Resize(input_size)
     if converted_caffe:
-        transform = transforms.Compose([
-            resize,
-            RGBtoBGR(),
-            NumpyToTensor(),
-            transforms.Normalize(mean=[104.01, 116.67, 122.68],
-                                 std=[1., 1., 1.]),
-        ])
+        transform = get_caffe_transform(size=input_size)
     else:
         normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                          std=[0.229, 0.224, 0.225])
@@ -346,6 +360,14 @@ def pointing_game(data_dir,
     else:
         assert(False)
 
+    print(f'dataset: {dataset}\n'
+          f'split: {split}\n'
+          f'arch: {arch}\n'
+          f'metric: {metric}\n'
+          f'smooth_sigma: {smooth_sigma}\n'
+          f'tolerance: {tolerance}\n' 
+          f'checkpoint_path: {checkpoint_path}\n'
+          f'out_path: {out_path}\n')
     print('Number of examples in dataset split: %d' % len(dset))
     if start_index != -1 or end_index != -1:
         if end_index == -1:
@@ -354,17 +376,21 @@ def pointing_game(data_dir,
             start_index = 0
         idx = range(start_index, end_index)
         dset = torch.utils.data.Subset(dset, idx)
+        print(f'Evaluating from {start_index} to {end_index}')
     else:
         start_index = 0
-
-    loader = torch.utils.data.DataLoader(dset, batch_size=1, shuffle=False)
+        end_index = len(dset)
 
     if save_dir is not None:
         create_dir_if_necessary(save_dir, is_dir=True)
 
     # Prepare to evaluate pointing game.
     if out_path is not None:
-        records = np.zeros((len(dset), num_classes))
+        if os.path.exists(out_path):
+            print('Loading previous records...')
+            records = np.loadtxt(out_path)
+        else:
+            records = np.zeros((len(dset), num_classes))
     if metric == 'pointing':
         hits = np.zeros(num_classes)
         misses = np.zeros(num_classes)
@@ -372,9 +398,30 @@ def pointing_game(data_dir,
         sum_precs = np.zeros(num_classes)
         num_examples = np.zeros(num_classes)
 
+    print(out_path)
+    print(np.sum(records))
+    if out_path is not None and np.sum(records) != 0:
+        print('here')
+        if metric == 'pointing':
+            hits = np.sum(records == 1, 0)
+            misses = np.sum(records == -1, 0)
+        elif metric == 'average_precision':
+            sum_precs = np.sum(records[records != 0], 0)
+            num_examples = np.sum(records != 0, 0)
+        next_index = np.where(records != 0)[0][-1]+1
+        print(f'Next Index {next_index}')
+    else:
+        next_index = 0
+
+    if next_index > 0:
+        dset = torch.utils.data.Subset(dset, range(next_index, len(dset)))
+
+    loader = torch.utils.data.DataLoader(dset, batch_size=1, shuffle=False)
+
     using_cpu = False
     t_loop = tqdm.tqdm(loader)
     for i, (x, y) in enumerate(t_loop):
+
         # Verify shape.
         assert(x.shape[0] == 1)
         assert(y.shape[0] == 1)
@@ -438,7 +485,15 @@ def pointing_game(data_dir,
                 vis = blur_input_tensor(vis,
                                         sigma=smooth_sigma*max(vis.shape[2:]))
         elif vis_method == 'cam':
-            acts = hook_get_acts(model, layer_names, x)[0]
+            try:
+                acts = hook_get_acts(model, layer_names, x)[0]
+            except RuntimeError:
+                using_cpu = True
+                print(f'Using CPU to handle image {i+start_index} with shape {x.shape}.')
+                x = x.cpu().clone().detach().requires_grad_(True)
+                model.to(cpu_device)
+                acts = hook_get_acts(model, layer_names, x)[0]
+
             vis_lowres = torch.mean(acts * weights.to(acts.device), 1,
                                     keepdim=True)
             vis = nn.functional.interpolate(vis_lowres,
@@ -454,10 +509,35 @@ def pointing_game(data_dir,
             weights.scatter_(1, labels, 1)
 
             # Get backpropagated gradient at intermediate layer.
-            pred_y.backward(weights)
+            try:
+                pred_y.backward(weights)
+            except:
+                # TODO(ruthfong): Handle with less redundancy.
+                using_cpu = True
+                print(f'Using CPU to handle image {i+start_index} with shape {x.shape}.')
+                # x = torch.tensor(x, device=cpu_device, requires_grad=True)
+                x = x.cpu().clone().detach().requires_grad_(True)
+                model.to(cpu_device)
+                model.zero_grad()
+                pred_y = model(x)
+
+                weights = torch.zeros_like(pred_y)
+                labels = torch.arange(0, num_classes).to(pred_y.device)
+                labels = labels[:, None, None, None]
+                labels_shape = (num_classes, 1, weights.shape[2], weights.shape[3])
+                labels = labels.expand(*labels_shape)
+                weights.scatter_(1, labels, 1)
+                pred_y.backward(weights)
+
             assert (len(grads) == 1)
-            assert(len(grads[0]) == 1)
-            grad = grads[0][0]
+            if len(grads[0]) == 1:
+                grad = grads[0][0]
+            else:
+                assert('googlenet' in arch)
+                grad = torch.cat(grads[0], 1)
+            grad = grad.to(pred_y.device)
+            # assert(len(grads[0]) == 1)
+            #grad = grads[0][-1]
             hook.remove()
 
             # Get activations at intermediate layer.
@@ -572,6 +652,9 @@ def pointing_game(data_dir,
         print(class_mean_avg_prec)
         return mean_avg_prec, class_mean_avg_prec
 
+    if out_path is not None:
+        compute_metrics(out_path, metric=metric, dataset=dataset)
+
 
 def find_best_alpha(data_dir,
                     checkpoint_path,
@@ -683,6 +766,7 @@ if __name__ == '__main__':
         parser.add_argument('--start_index', type=int, default=-1)
         parser.add_argument('--end_index', type=int, default=-1)
         parser.add_argument('--load_from_save_dir', type='bool', default=False)
+        parser.add_argument('--layer_name', type=str, default=None)
 
         args = parser.parse_args()
         set_gpu(args.gpu)
@@ -705,6 +789,7 @@ if __name__ == '__main__':
                       final_gap_layer=args.final_gap_layer,
                       start_index=args.start_index,
                       end_index=args.end_index,
+                      layer_name=args.layer_name,
                       debug=args.debug)
     except:
         traceback.print_exc(file=sys.stdout)
