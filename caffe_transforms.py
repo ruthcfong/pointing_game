@@ -121,8 +121,9 @@ class CaffeChannelSwap(object):
         self.order = order
 
     def __call__(self, orig_img):
-        assert(isinstance(orig_img, np.ndarray))
-        assert(orig_img.ndim == 3)
+        assert(isinstance(orig_img, np.ndarray)
+               or isinstance(orig_img, torch.Tensor))
+        assert(len(orig_img.shape) == 3)
         if len(self.order) != orig_img.shape[0]:
             raise Exception('Channel swap needs to have the same number of '
                             'dimensions as the input channels.')
