@@ -19,5 +19,5 @@ cd models
 
 for download_link in "${download_links[@]}"
 do
-    wget ${download_link}
+    wget --continue ${download_link}
 done
