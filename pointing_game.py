@@ -99,7 +99,9 @@ class FromCocoToDenseSegmentationMasks(object):
             assert('category_id' in ann)
             class_i = self.class_to_idx[ann['category_id']]
             mask = self.coco.annToMask(ann)
-            seg_masks[:, :, class_i] = mask
+            seg_masks[:, :, class_i] += mask
+
+        seg_masks = (seg_masks > 0).astype(np.floate32)
 
         if self.tolerance > 0:
             seg_masks = cv2.dilate(seg_masks, self.kernel, iterations=1)
