@@ -101,7 +101,7 @@ class FromCocoToDenseSegmentationMasks(object):
             mask = self.coco.annToMask(ann)
             seg_masks[:, :, class_i] += mask
 
-        seg_masks = (seg_masks > 0).astype(np.floate32)
+        seg_masks = (seg_masks > 0).astype(np.float32)
 
         if self.tolerance > 0:
             seg_masks = cv2.dilate(seg_masks, self.kernel, iterations=1)
