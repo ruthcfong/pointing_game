@@ -20,6 +20,9 @@ from torchvision import models
 
 from tqdm import tqdm
 
+from resnet_caffe import load_resnet50
+
+
 VOC_CLASSES = np.array([
     'aeroplane',
     'bicycle',
@@ -98,15 +101,20 @@ class RISE(nn.Module):
         N = self.N
         _, _, H, W = x.size()
 
+        # print('msk shape', self.masks.shape)
+        # print('x shape', x.shape)
         p = []
         for i in range(0, N, self.gpu_batch):
-            x_new = torch.mul(self.masks[i:min(i + self.gpu_batch, N)],
-                              x.cpu().data).cuda()
-            p.append(self.sigmoid(self.model(x_new)).cpu())
+            with torch.no_grad():
+                x_new = torch.mul(self.masks[i:min(i + self.gpu_batch, N)],
+                                  x.cpu().data).cuda()
+                p.append(self.sigmoid(self.model(x_new)).cpu())
         p = torch.cat(p)
 
         # Number of classes.
         CL = p.size(1)
+        # print(CL)
+        # print(p.shape)
 
         if len(p.shape) == 4:
             assert(p.shape[2] == 1)
@@ -239,18 +247,6 @@ class GoogLeNetNormalize(object):
         return x
 
 
-class VGGFullyConvolutional(nn.Module):
-    "Remove global average pooling layer from forward function."
-    def __init__(self, model):
-        self.features = self.features
-        self.classifier = self.classifier
-
-    def forward(self, x):
-        x = self.features(x)
-        x = self.classifier(x)
-        return x
-
-
 class CaffeNetWrapper(nn.Module):
     def __init__(self, model, key):
         self.model = model
@@ -277,13 +273,6 @@ def get_finetune_model(arch='vgg16',
         num_classes = 80
     else:
         assert(False)
-
-    if converted_caffe and arch == 'resnet50':
-        assert checkpoint_path is not None
-        # Requires an installation of pycaffe.
-        model = torch.load(checkpoint_path)
-        model = CaffeNetWrapper(model, 'fc8')
-        return model
 
     # Load pre-trained model.
     # Handle GoogLeNet specially because it's not in the stable release of torchvision yet.
@@ -323,8 +312,8 @@ def get_finetune_model(arch='vgg16',
 
     # Load weights, if provided.
     if checkpoint_path is not None:
-        checkpoint = torch.load(checkpoint_path, map_location='cpu')
         if converted_caffe:
+            checkpoint = torch.load(checkpoint_path, map_location='cpu')
             if arch == 'vgg16':
                 classifier_keys = [k for k in checkpoint.keys()
                                    if 'classifier' in k]
@@ -347,10 +336,14 @@ def get_finetune_model(arch='vgg16',
                     # Delete old key-value pair.
                     if new_k != k:
                         del checkpoint[k]
+                model.load_state_dict(checkpoint)
+            elif arch == 'resnet50':
+                # Load custom ResNet50 architecture.
+                model = load_resnet50(checkpoint_path)
             else:
                 assert(False)
-            model.load_state_dict(checkpoint)
         else:
+            checkpoint = torch.load(checkpoint_path, map_location='cpu')
             model.load_state_dict(checkpoint['state_dict'])
 
     # Convert model to fully convolutional one.

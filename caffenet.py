@@ -15,7 +15,7 @@ from collections import OrderedDict
 from prototxt import *
 import caffe
 import caffe.proto.caffe_pb2 as caffe_pb2
-if disable_torch_legacy:
+if not disable_torch_legacy:
     from torch.legacy.nn import SpatialCrossMapLRN as SpatialCrossMapLRNOld
 from itertools import product as product
 from detection import Detection, MultiBoxLoss

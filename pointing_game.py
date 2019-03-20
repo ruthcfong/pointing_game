@@ -29,7 +29,7 @@ import tqdm
 
 import visdom
 
-from caffe_transforms import get_caffe_transform
+from caffe_transforms import get_caffe_transform, CaffeChannelSwap
 
 from utils import (get_finetune_model, VOC_CLASSES, SimpleToTensor, get_device,
                    set_gpu, blur_input_tensor, register_hook_on_module,
@@ -206,7 +206,8 @@ def pointing_game(data_dir,
                   start_index=-1,
                   end_index=-1,
                   layer_name=None,
-                  eps=1e-6):
+                  eps=1e-6,
+                  gpu_batch=100):
     """
     Play the pointing game using a finetuned model and visualization method.
 
@@ -236,7 +237,7 @@ def pointing_game(data_dir,
             acc: ndarray, array containing accuracies for each class.
     """
     if debug:
-        viz = visdom.Visdom()
+        viz = visdom.Visdom(env=f'pointing_caffe_{converted_caffe}')
 
     # Load fine-tuned model with weights and convert to be fully convolutional.
     model = get_finetune_model(arch=arch,
@@ -303,7 +304,7 @@ def pointing_game(data_dir,
         assert(len(layer_names) == 1)
         hook = get_pytorch_module(model, layer_names[0]).register_backward_hook(hook_grads)
     elif vis_method == 'rise':
-        explainer = RISE(model, input_size, gpu_batch=100)
+        explainer = RISE(model, input_size, gpu_batch=gpu_batch)
         try:
             explainer.load_masks()
         except:
@@ -312,18 +313,21 @@ def pointing_game(data_dir,
     # Prepare data augmentation.
     assert(isinstance(input_size, int))
     if vis_method == 'rise':
-        resize = transforms.Resize((input_size, input_size))
+        resize_transform = transforms.Resize((input_size, input_size))
     else:
-        resize = transforms.Resize(input_size)
+        resize_transform = transforms.Resize(input_size)
     if converted_caffe:
-        transform = get_caffe_transform(size=input_size)
+        if vis_method == 'rise':
+            transform = get_caffe_transform(size=(input_size, input_size))
+        else:
+            transform = get_caffe_transform(size=input_size)
     else:
-        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                         std=[0.229, 0.224, 0.225])
+        normalize_transform = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                                   std=[0.229, 0.224, 0.225])
         transform = transforms.Compose([
-            resize,
+            resize_transform,
             transforms.ToTensor(),
-            normalize,
+            normalize_transform,
         ])
 
     if 'voc' in dataset:
@@ -613,11 +617,32 @@ def pointing_game(data_dir,
                 num_examples[c] += 1
                 if out_path is not None:
                     records[i,c] = ap
-                if debug:
-                    viz.image(vutils.make_grid(x, normalize=True), win=0)
-                    viz.image(vutils.make_grid(vis[c], normalize=True), win=1)
             else:
                 assert(False)
+            if debug:
+                def normalize_arr(x):
+                    x_min, x_max = np.min(x), np.max(x)
+                    return (x - x_min) / (x_max - x_min)
+
+                import matplotlib
+                matplotlib.use('Agg')
+                import matplotlib.pyplot as plt
+                if converted_caffe:
+                    viz.image(vutils.make_grid(CaffeChannelSwap()(x[0]).unsqueeze(0), normalize=True), win=0)
+                else:
+                    viz.image(vutils.make_grid(x, normalize=True), win=0)
+                viz.image(vutils.make_grid(vis[c], normalize=True), win=1)
+                # time.sleep(1)
+                f, ax = plt.subplots(1, 1)
+                if converted_caffe:
+                    ax.imshow(vutils.make_grid(CaffeChannelSwap()(x[0]).unsqueeze(0), normalize=True).cpu().data.squeeze().numpy().transpose(1, 2, 0))
+                else:
+                    ax.imshow(vutils.make_grid(x, normalize=True).cpu().data.squeeze().numpy().transpose(1, 2, 0))
+                ax.imshow(resize(normalize_arr(vis[c].cpu().data.numpy().transpose(1, 2, 0)), x.shape[2:]).squeeze(), alpha=0.5, cmap='jet')
+                create_dir_if_necessary(os.path.join(save_dir, 'debug_images'), True)
+                plt.savefig(os.path.join(save_dir, 'debug_images', f'{i+start_index:06d}_class_{c}.png'))
+                plt.close()
+                # print(np.argmax(y[0].cpu().data.numpy()))
 
         if i % print_iter == 0:
             if metric == 'pointing':
@@ -767,6 +792,7 @@ if __name__ == '__main__':
         parser.add_argument('--end_index', type=int, default=-1)
         parser.add_argument('--load_from_save_dir', type='bool', default=False)
         parser.add_argument('--layer_name', type=str, default=None)
+        parser.add_argument('--gpu_batch', type=int, default=100)
 
         args = parser.parse_args()
         set_gpu(args.gpu)
@@ -790,7 +816,8 @@ if __name__ == '__main__':
                       start_index=args.start_index,
                       end_index=args.end_index,
                       layer_name=args.layer_name,
-                      debug=args.debug)
+                      debug=args.debug,
+                      gpu_batch=args.gpu_batch)
     except:
         traceback.print_exc(file=sys.stdout)
         sys.exit(1)

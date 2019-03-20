@@ -133,7 +133,7 @@ class CaffeChannelSwap(object):
 
 class CaffeScale(object):
     """Equivalent to caffe.io.set_raw_scale."""
-    def __init__(self, scale):
+    def __init__(self, scale=255.):
         assert isinstance(scale, int) or isinstance(scale, float)
         self.scale = scale
 

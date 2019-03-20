@@ -1,6 +1,6 @@
 numpy
 torch
 torchvision
-skimage
+scikit-image
 visdom
 tqdm
