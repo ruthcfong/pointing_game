@@ -57,11 +57,13 @@ def compute_metric(records, metric='pointing', idx=None):
 
 def compute_metrics(out_path, metric='pointing', dataset='voc_2007'):
     records = np.loadtxt(out_path)
-    hard_idx = np.loadtxt(f'data/hard_{dataset}.txt', delimiter=',')
-    assert(records.shape == hard_idx.shape)
     print(f'Computing metrics from {out_path}')
     print(f'Overall Performance on {dataset}')
     compute_metric(records, metric=metric)
+    hard_idx = np.loadtxt(f'data/hard_{dataset}.txt', delimiter=',')
+    if records.shape != hard_idx.shape:
+        print('Different shapes between records %s and hard idx %s.' % (records.shape,
+                                                                        hard_idx.shape))
     print(f'Difficult Performance on {dataset}')
     compute_metric(records, metric=metric, idx=hard_idx)
 
