@@ -49,13 +49,14 @@ COCO_CATEGORY_IDS = np.loadtxt(os.path.join(os.path.dirname(__file__), 'data/coc
 
 
 class RISE(nn.Module):
-    def __init__(self, model, input_size, gpu_batch=100):
+    def __init__(self, model, input_size, device, gpu_batch=100):
         super(RISE, self).__init__()
         self.model = model
         assert(isinstance(input_size, int))
         self.input_size = input_size
         self.gpu_batch = gpu_batch
         self.sigmoid = nn.Sigmoid()
+        self.device = device
 
     def generate_masks(self, N, s, p1, savepath='masks.npy'):
         cell_size = np.ceil(self.input_size / s)
@@ -107,7 +108,7 @@ class RISE(nn.Module):
         for i in range(0, N, self.gpu_batch):
             with torch.no_grad():
                 x_new = torch.mul(self.masks[i:min(i + self.gpu_batch, N)],
-                                  x.cpu().data).cuda()
+                                  x.cpu().data).to(self.device)
                 p.append(self.sigmoid(self.model(x_new)).cpu())
         p = torch.cat(p)
 
