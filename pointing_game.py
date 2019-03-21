@@ -186,6 +186,16 @@ class SimpleResize(object):
         return new_x
 
 
+class SortedFolder(datasets.ImageFolder):
+    def __init__(self, root, transform=None, target_transform=None):
+        super(SortedFolder, self).__init__(root, transform=transform,
+                                           target_transform=target_transform)
+        names = [os.path.basename(x[0]) for x in self.samples]
+        self.sorted_idx = np.argsort(names)
+        new_samples = [self.samples[i] for i in self.sorted_idx]
+        self.samples = new_samples
+
+
 def pointing_game(data_dir,
                   checkpoint_path,
                   out_path=None,
@@ -199,8 +209,6 @@ def pointing_game(data_dir,
                   metric='pointing',
                   input_size=224,
                   vis_method='gradient',
-                  tolerance=0,
-                  smooth_sigma=0.,
                   final_gap_layer=False,
                   debug=False,
                   print_iter=1,
@@ -238,6 +246,18 @@ def pointing_game(data_dir,
             avg_acc: Float, pointing game accuracy over all classes,
             acc: ndarray, array containing accuracies for each class.
     """
+    if metric == 'pointing':
+        tolerance = 15
+    elif metric == 'average_precision':
+        tolerance = 0
+    else:
+        assert False
+
+    if vis_method in ['gradient', 'guided_backprop']:
+        smooth_sigma = 0.02
+    else:
+        smooth_sigma = 0
+
     if debug:
         viz = visdom.Visdom(env=f'pointing_caffe_{converted_caffe}')
 
@@ -276,6 +296,8 @@ def pointing_game(data_dir,
             # Get second to last layer (exclude GAP and last fc layer).
             layer_name = '%d' % (len(list(model.children())) - 2)
             layer_names = [layer_name]
+        else:
+            assert False
         last_layer = list(model.children())[-1]
         assert(isinstance(last_layer, nn.Conv2d))
         weights = last_layer.state_dict()['weight']
@@ -363,6 +385,9 @@ def pointing_game(data_dir,
         ])
 
         dset.target_transform = target_transform
+    elif 'imnet' in dataset:
+        num_classes = 1000
+        dset = SortedFolder(os.path.join(data_dir, split), transform=transform)
     else:
         assert(False)
 
@@ -373,7 +398,8 @@ def pointing_game(data_dir,
           f'smooth_sigma: {smooth_sigma}\n'
           f'tolerance: {tolerance}\n' 
           f'checkpoint_path: {checkpoint_path}\n'
-          f'out_path: {out_path}\n')
+          f'out_path: {out_path}\n'
+          f'save_dir: {save_dir}\n')
     print('Number of examples in dataset split: %d' % len(dset))
     if start_index != -1 or end_index != -1:
         if end_index == -1:
@@ -404,15 +430,12 @@ def pointing_game(data_dir,
         sum_precs = np.zeros(num_classes)
         num_examples = np.zeros(num_classes)
 
-    print(out_path)
-    print(np.sum(records))
     if out_path is not None and np.sum(records) != 0:
-        print('here')
         if metric == 'pointing':
             hits = np.sum(records == 1, 0)
             misses = np.sum(records == -1, 0)
         elif metric == 'average_precision':
-            sum_precs = np.sum(records[records != 0], 0)
+            sum_precs = np.sum(records, 0)
             num_examples = np.sum(records != 0, 0)
         next_index = np.where(records != 0)[0][-1]+1
         print(f'Next Index {next_index}')
@@ -421,9 +444,13 @@ def pointing_game(data_dir,
 
     if next_index > 0:
         dset = torch.utils.data.Subset(dset, range(next_index, len(dset)))
+        start_index = next_index
 
     loader = torch.utils.data.DataLoader(dset, batch_size=1, shuffle=False)
 
+    image_idx = []
+    y_shapes = []
+    vis_shapes = []
     using_cpu = False
     t_loop = tqdm.tqdm(loader)
     for i, (x, y) in enumerate(t_loop):
@@ -435,10 +462,22 @@ def pointing_game(data_dir,
         # Move data to device.
         x = x.to(device)
 
+        # Get present classes in the image.
+        if 'imnet' in dataset:
+            class_idx = y.numpy()
+        else:
+            class_idx = np.where(np.sum(y[0].cpu().data.numpy(), (1, 2)) > 0)[0]
+        curr_num_classes = len(class_idx)
+        if curr_num_classes == 0:
+            print(f'Skipping image {i+start_index}; no classes in it.')
+            continue
+        assert(curr_num_classes >= 1)
+
         if vis_method != 'rise':
             # Set input batch size to the number of classes.
-            x = x.expand(num_classes, *x.shape[1:])
-            x.requires_grad = True
+            x = x.expand(curr_num_classes, *x.shape[1:])
+            if vis_method is not 'cam':
+                x.requires_grad = True
 
             model.zero_grad()
             try:
@@ -458,9 +497,9 @@ def pointing_game(data_dir,
 
             # Prepare gradient.
             weights = torch.zeros_like(pred_y)
-            labels = torch.arange(0, num_classes).to(pred_y.device)
+            labels = torch.from_numpy(class_idx).to(pred_y.device)
             labels = labels[:, None, None, None]
-            labels_shape = (num_classes, 1, weights.shape[2], weights.shape[3])
+            labels_shape = (curr_num_classes, 1, weights.shape[2], weights.shape[3])
             labels = labels.expand(*labels_shape)
             weights.scatter_(1, labels, 1)
             try:
@@ -476,9 +515,9 @@ def pointing_game(data_dir,
                 pred_y = model(x)
 
                 weights = torch.zeros_like(pred_y)
-                labels = torch.arange(0, num_classes).to(pred_y.device)
+                labels = torch.from_numpy(class_idx).to(pred_y.device)
                 labels = labels[:, None, None, None]
-                labels_shape = (num_classes, 1, weights.shape[2], weights.shape[3])
+                labels_shape = (curr_num_classes, 1, weights.shape[2], weights.shape[3])
                 labels = labels.expand(*labels_shape)
                 weights.scatter_(1, labels, 1)
                 pred_y.backward(weights)
@@ -500,7 +539,8 @@ def pointing_game(data_dir,
                 model.to(cpu_device)
                 acts = hook_get_acts(model, layer_names, x)[0]
 
-            vis_lowres = torch.mean(acts * weights.to(acts.device), 1,
+            vis_lowres = torch.mean(acts * weights[class_idx].to(acts.device),
+                                    1,
                                     keepdim=True)
             vis = nn.functional.interpolate(vis_lowres,
                                             size=y.shape[2:],
@@ -508,9 +548,9 @@ def pointing_game(data_dir,
         elif vis_method == 'grad_cam':
             # Prepare gradient.
             weights = torch.zeros_like(pred_y)
-            labels = torch.arange(0, num_classes).to(pred_y.device)
+            labels = torch.from_numpy(class_idx).to(pred_y.device)
             labels = labels[:, None, None, None]
-            labels_shape = (num_classes, 1, weights.shape[2], weights.shape[3])
+            labels_shape = (curr_num_classes, 1, weights.shape[2], weights.shape[3])
             labels = labels.expand(*labels_shape)
             weights.scatter_(1, labels, 1)
 
@@ -528,9 +568,9 @@ def pointing_game(data_dir,
                 pred_y = model(x)
 
                 weights = torch.zeros_like(pred_y)
-                labels = torch.arange(0, num_classes).to(pred_y.device)
+                labels = torch.from_numpy(class_idx).to(pred_y.device)
                 labels = labels[:, None, None, None]
-                labels_shape = (num_classes, 1, weights.shape[2], weights.shape[3])
+                labels_shape = (curr_num_classes, 1, weights.shape[2], weights.shape[3])
                 labels = labels.expand(*labels_shape)
                 weights.scatter_(1, labels, 1)
                 pred_y.backward(weights)
@@ -553,21 +593,31 @@ def pointing_game(data_dir,
             grad_weights = torch.mean(grad, (2, 3), keepdim=True)
 
             # Linearly combine activations and gradient weights.
-            grad_cam = torch.sum(acts * grad_weights, 1, keepdim=True)
+            try:
+                grad_cam = torch.sum(acts * grad_weights, 1, keepdim=True)
+            except:
+                import pdb; pdb.set_trace()
 
             # Apply ReLU to GradCAM vis.
             vis_lowres = torch.clamp(grad_cam, min=0)
 
             # Upsample visualization to image size.
             vis = nn.functional.interpolate(vis_lowres,
-                                            size=y.shape[2:],
+                                            size=x.shape[2:],
                                             mode='bilinear')
 
         elif vis_method == 'rise':
             if load_from_save_dir:
                 try:
                     vis = torch.load(os.path.join(save_dir, f'{i+start_index:06d}.pth'))
+                    if isinstance(vis, torch.Tensor):
+                        vis = vis[class_idx]
+                    else:
+                        assert isinstance(vis, dict)
+                        vis = vis['vis']
+                        assert np.all(class_idx == vis['class_idx'])
                 except:
+                    print('No file for {i+start_index:06d}, running RISE.')
                     vis = explainer(x)
                     vis = vis.unsqueeze(1)
                     # Upsample visualization to image size.
@@ -578,30 +628,43 @@ def pointing_game(data_dir,
 
             else:
                 vis = explainer(x)
+                vis = vis[class_idx]
                 vis = vis.unsqueeze(1)
                 # Upsample visualization to image size.
-                vis = nn.functional.interpolate(vis,
-                                                size=y.shape[2:],
-                                                mode='bilinear')
+                if not 'imnet' in dataset:
+                    vis = nn.functional.interpolate(vis,
+                                                    size=y.shape[2:],
+                                                    mode='bilinear')
         else:
             assert(False)
+
+        if save_dir is not None and not load_from_save_dir:
+            torch.save({'vis': vis,
+                        'class_idx': class_idx,
+                        }, os.path.join(save_dir, f'{i+start_index:06d}.pth'))
+
+        if 'imnet' in dataset:
+            continue
 
         # Move model back to GPU if necessary.
         if using_cpu:
             model.to(device)
             using_cpu = False
 
-        if save_dir is not None and not load_from_save_dir:
-            torch.save(vis, os.path.join(save_dir, f'{i+start_index:06d}.pth'))
+        y_shape = y.shape[2:]
+        vis_shape = vis.shape[2:]
+        image_idx.append(i+start_index)
+        y_shapes.append(y_shape)
+        vis_shapes.append(vis_shape)
+        if y.shape[2] != vis.shape[2] or y.shape[3] != vis.shape[3]:
+            print(f'{i+start_index:06d}: output shape {y_shape} and vis shape {vis_shape} do not match')
+            continue
 
-        # Get present classes in the image.
-        class_idx = np.where(np.sum(y[0].cpu().data.numpy(), (1, 2)) > 0)[0]
-
-        for c in class_idx:
+        for class_i, c in enumerate(class_idx):
             # Check if maximum point for class-specific visualization is
             # within one of the bounding boxes for that class.
             if metric == 'pointing':
-                max_i = torch.argmax(vis[c])
+                max_i = torch.argmax(vis[class_i])
                 if y[0,c,:,:].view(-1)[max_i] > 0.5:
                     hits[c] += 1
                     if out_path is not None:
@@ -613,7 +676,7 @@ def pointing_game(data_dir,
             elif metric == 'average_precision':
                 # Flatten visualization and ground truth data.
                 y_flat = y[0,c].reshape(-1).float()
-                vis_flat = vis[c].reshape(-1).cpu().data.numpy()
+                vis_flat = vis[class_i].reshape(-1).cpu().data.numpy()
                 ap = average_precision_score(y_flat, vis_flat)
                 sum_precs[c] += ap
                 num_examples[c] += 1
@@ -633,16 +696,16 @@ def pointing_game(data_dir,
                     viz.image(vutils.make_grid(CaffeChannelSwap()(x[0]).unsqueeze(0), normalize=True), win=0)
                 else:
                     viz.image(vutils.make_grid(x, normalize=True), win=0)
-                viz.image(vutils.make_grid(vis[c], normalize=True), win=1)
+                viz.image(vutils.make_grid(vis[class_i], normalize=True), win=1)
                 # time.sleep(1)
                 f, ax = plt.subplots(1, 1)
                 if converted_caffe:
                     ax.imshow(vutils.make_grid(CaffeChannelSwap()(x[0]).unsqueeze(0), normalize=True).cpu().data.squeeze().numpy().transpose(1, 2, 0))
                 else:
                     ax.imshow(vutils.make_grid(x, normalize=True).cpu().data.squeeze().numpy().transpose(1, 2, 0))
-                ax.imshow(resize(normalize_arr(vis[c].cpu().data.numpy().transpose(1, 2, 0)), x.shape[2:]).squeeze(), alpha=0.5, cmap='jet')
+                ax.imshow(resize(normalize_arr(vis[class_i].cpu().data.numpy().transpose(1, 2, 0)), x.shape[2:]).squeeze(), alpha=0.5, cmap='jet')
                 create_dir_if_necessary(os.path.join(save_dir, 'debug_images'), True)
-                plt.savefig(os.path.join(save_dir, 'debug_images', f'{i+start_index:06d}_class_{c}.png'))
+                plt.savefig(os.path.join(save_dir, 'debug_images', f'{i+start_index:06d}_class_{class_i}.png'))
                 plt.close()
                 # print(np.argmax(y[0].cpu().data.numpy()))
 
@@ -662,7 +725,13 @@ def pointing_game(data_dir,
         if i % save_iter == 0 and out_path is not None:
             create_dir_if_necessary(out_path)
             np.savetxt(out_path, records)
+            torch.save({'image_idx': image_idx,
+                        'vis_shapes': vis_shapes,
+                        'y_shapes': y_shapes}, 'errors.pth')
 
+    torch.save({'image_idx': image_idx,
+                'vis_shapes': vis_shapes,
+                'y_shapes': y_shapes}, 'errors.pth')
     if out_path is not None:
         create_dir_if_necessary(out_path)
         np.savetxt(out_path, records)
@@ -752,20 +821,20 @@ if __name__ == '__main__':
                             default='/datasets/pascal',
                             help='path to root directory containing data')
         parser.add_argument('--checkpoint_path', type=str,
-                            default='checkpoint.pth.tar',
+                            default=None,
                             help='path to save checkpoint')
         parser.add_argument('--arch', type=str, default='vgg16',
                             help='name of CNN architecture (choose from '
                                  'PyTorch pretrained networks')
         parser.add_argument('--dataset',
-                            choices=['voc_2007', 'coco_2014', 'coco_2017'],
+                            choices=['voc_2007', 'coco_2014', 'coco_2017', 'imnet'],
                             default='voc_2007',
                             help='name of dataset')
         parser.add_argument('--ann_dir', type=str, default=None,
                             help='path to root directory containing '
                                  'annotation files (for COCO).')
         parser.add_argument('--split', type=str,
-                            choices=['val', 'test', 'val2014', 'val2017'],
+                            choices=['val', 'test', 'val2014', 'val2017', 'val_pytorch'],
                             default='test',
                             help='name of split to use')
         parser.add_argument('--input_size', type=int, default=224,
@@ -775,10 +844,6 @@ if __name__ == '__main__':
                                      'grad_cam', 'rise'],
                             default='gradient',
                             help='CNN image input size')
-        parser.add_argument('--tolerance', type=int, default=0,
-                            help='amount of tolerance to add')
-        parser.add_argument('--smooth_sigma', type=float, default=0.,
-                            help='amount of Gaussian smoothing to apply')
         parser.add_argument('--final_gap_layer', type='bool', default=True,
                             help='if True, add a final GAP layer')
         parser.add_argument('--gpu', type=int, nargs='*', default=None,
@@ -812,8 +877,6 @@ if __name__ == '__main__':
                       metric=args.metric,
                       input_size=args.input_size,
                       vis_method=args.vis_method,
-                      tolerance=args.tolerance,
-                      smooth_sigma=args.smooth_sigma,
                       final_gap_layer=args.final_gap_layer,
                       start_index=args.start_index,
                       end_index=args.end_index,

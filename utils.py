@@ -271,6 +271,8 @@ def get_finetune_model(arch='vgg16',
         num_classes = 20
     elif 'coco' in dataset:
         num_classes = 80
+    elif 'imnet' in dataset:
+        num_classes = 1000
     else:
         assert(False)
 
@@ -297,18 +299,19 @@ def get_finetune_model(arch='vgg16',
         p.requires_grad = False
 
     # Get the last layer.
-    last_name, last_module = list(model.named_modules())[-1]
+    if 'imnet' not in dataset:
+        last_name, last_module = list(model.named_modules())[-1]
 
-    # Construct new last layer.
-    if isinstance(last_module, nn.Linear):
-        in_features = last_module.in_features
-        bias = last_module.bias is not None
-        new_layer_module = nn.Linear(in_features, num_classes, bias=bias)
-    else:
-        assert(False)
+        # Construct new last layer.
+        if isinstance(last_module, nn.Linear):
+            in_features = last_module.in_features
+            bias = last_module.bias is not None
+            new_layer_module = nn.Linear(in_features, num_classes, bias=bias)
+        else:
+            assert(False)
 
-    # Replace last layer.
-    model = replace_module(model, last_name.split('.'), new_layer_module)
+        # Replace last layer.
+        model = replace_module(model, last_name.split('.'), new_layer_module)
 
     # Load weights, if provided.
     if checkpoint_path is not None:
