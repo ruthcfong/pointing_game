@@ -27,7 +27,7 @@ import torchvision.utils as vutils
 
 import tqdm
 
-import visdom
+#import visdom
 
 from caffe_transforms import get_caffe_transform, CaffeChannelSwap
 
@@ -40,6 +40,10 @@ from compute_score import compute_metrics
 
 MAX_GPU_LENGTH = 500
 
+
+def get_synset(class_ix):
+    synset = np.loadtxt('./data/synset_words.txt', dtype=str, delimiter='\t')
+    return synset[class_ix][0].split(' ')[0]
 
 class NumpyToTensor(object):
     def __call__(self, img):
@@ -259,7 +263,8 @@ def pointing_game(data_dir,
         smooth_sigma = 0
 
     if debug:
-        viz = visdom.Visdom(env=f'pointing_caffe_{converted_caffe}')
+        print("Debugging")
+        # viz = visdom.Visdom(env=f'pointing_caffe_{converted_caffe}')
 
     # Load fine-tuned model with weights and convert to be fully convolutional.
     model = get_finetune_model(arch=arch,
@@ -328,7 +333,7 @@ def pointing_game(data_dir,
         assert(len(layer_names) == 1)
         hook = get_pytorch_module(model, layer_names[0]).register_backward_hook(hook_grads)
     elif vis_method == 'rise':
-        explainer = RISE(model, input_size, gpu_batch=gpu_batch)
+        explainer = RISE(model, input_size, device, gpu_batch=gpu_batch)
         try:
             explainer.load_masks()
         except:
@@ -639,13 +644,18 @@ def pointing_game(data_dir,
             assert(False)
 
         if save_dir is not None and not load_from_save_dir:
-            torch.save({'vis': vis,
+            save_path = os.path.join(save_dir, get_synset(class_idx))
+            if not os.path.exists(save_path):
+                os.makedirs(save_path)
+            
+            torch.save({'mask': vis,
                         'class_idx': class_idx,
-                        }, os.path.join(save_dir, f'{i+start_index:06d}.pth'))
+                        }, os.path.join(save_path, 'ILSVRC2012_val_' + f'{i+1+start_index:08d}.JPEG.pth'))
 
         if 'imnet' in dataset:
             continue
 
+    '''
         # Move model back to GPU if necessary.
         if using_cpu:
             model.to(device)
@@ -693,8 +703,10 @@ def pointing_game(data_dir,
                 matplotlib.use('Agg')
                 import matplotlib.pyplot as plt
                 if converted_caffe:
-                    viz.image(vutils.make_grid(CaffeChannelSwap()(x[0]).unsqueeze(0), normalize=True), win=0)
+                    print('converted')
+                    #viz.image(vutils.make_grid(CaffeChannelSwap()(x[0]).unsqueeze(0), normalize=True), win=0)
                 else:
+                    print('not converted')
                     viz.image(vutils.make_grid(x, normalize=True), win=0)
                 viz.image(vutils.make_grid(vis[class_i], normalize=True), win=1)
                 # time.sleep(1)
@@ -750,7 +762,7 @@ def pointing_game(data_dir,
 
     if out_path is not None:
         compute_metrics(out_path, metric=metric, dataset=dataset)
-
+    '''
 
 def find_best_alpha(data_dir,
                     checkpoint_path,

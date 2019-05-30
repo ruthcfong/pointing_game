@@ -22,6 +22,10 @@ from tqdm import tqdm
 
 from resnet_caffe import load_resnet50
 
+from torchvision.models.vgg import model_urls
+model_urls['vgg16'] = model_urls['vgg16'].replace('https://', 'http://')
+
+
 
 VOC_CLASSES = np.array([
     'aeroplane',
