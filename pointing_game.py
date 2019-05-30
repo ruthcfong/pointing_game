@@ -41,6 +41,10 @@ from compute_score import compute_metrics
 MAX_GPU_LENGTH = 500
 
 
+def get_synset(class_ix):
+    synset = np.loadtxt('./data/synset_words.txt', dtype=str, delimiter='\t')
+    return synset[class_ix][0].split(' ')[0]
+
 class NumpyToTensor(object):
     def __call__(self, img):
         assert(img.ndim == 3)
@@ -652,13 +656,18 @@ def pointing_game(data_dir,
             assert(False)
 
         if save_dir is not None and not load_from_save_dir:
-            torch.save({'vis': vis,
+            save_path = os.path.join(save_dir, get_synset(class_idx))
+            if not os.path.exists(save_path):
+                os.makedirs(save_path)
+            
+            torch.save({'mask': vis,
                         'class_idx': class_idx,
-                        }, os.path.join(save_dir, f'{i+start_index:06d}.pth'))
+                        }, os.path.join(save_path, 'ILSVRC2012_val_' + f'{i+1+start_index:08d}.JPEG.pth'))
 
         if 'imnet' in dataset:
             continue
 
+    
         # Move model back to GPU if necessary.
         if using_cpu:
             model.to(device)
@@ -732,9 +741,8 @@ def pointing_game(data_dir,
             t_loop.set_description(f'{metric_name} {running_avg:.4f}')
             if debug:
                 pass
-                # viz.image(vutils.make_grid(x[0].unsqueeze(0), normalize=True),
-                #           0)
-                # viz.image(vutils.make_grid(vis, normalize=True), 1)
+                viz.image(vutils.make_grid(x[0].unsqueeze(0), normalize=True), 0)
+                viz.image(vutils.make_grid(vis, normalize=True), 1)
         if i % save_iter == 0 and out_path is not None:
             create_dir_if_necessary(out_path)
             np.savetxt(out_path, records)
@@ -763,7 +771,7 @@ def pointing_game(data_dir,
 
     if out_path is not None:
         compute_metrics(out_path, metric=metric, dataset=dataset)
-
+    
 
 def find_best_alpha(data_dir,
                     checkpoint_path,
