@@ -217,6 +217,10 @@ def pointing_game(data_dir,
                   end_index=-1,
                   layer_name=None,
                   eps=1e-6,
+                  num_masks=4000,
+                  s=7,
+                  p1=0.5,
+                  rise_filter_path=None,
                   gpu_batch=100):
     """
     Play the pointing game using a finetuned model and visualization method.
@@ -328,11 +332,14 @@ def pointing_game(data_dir,
         assert(len(layer_names) == 1)
         hook = get_pytorch_module(model, layer_names[0]).register_backward_hook(hook_grads)
     elif vis_method == 'rise':
-        explainer = RISE(model, input_size, gpu_batch=gpu_batch)
-        try:
-            explainer.load_masks()
-        except:
-            explainer.generate_masks(N=4000, s=7, p1=0.5)
+        explainer = RISE(model, input_size, device=device, gpu_batch=gpu_batch)
+        if rise_filter_path is None or not os.path.exists(rise_filter_path):
+            if rise_filter_path is None:
+                rise_filter_path = 'masks.npy'
+            create_dir_if_necessary(rise_filter_path)
+            explainer.generate_masks(N=num_masks, s=s, p1=p1, savepath=rise_filter_path)
+        else:
+            explainer.load_masks(filepath=rise_filter_path)
 
     # Prepare data augmentation.
     assert(isinstance(input_size, int))
@@ -454,6 +461,11 @@ def pointing_game(data_dir,
     using_cpu = False
     t_loop = tqdm.tqdm(loader)
     for i, (x, y) in enumerate(t_loop):
+        if (save_dir is not None
+            and os.path.exists(os.path.join(save_dir, f'{i+start_index:06d}.pth'))
+            and 'imnet' in dataset):
+            print(f'Skipping image {i+start_index}; already saved.')
+            continue
 
         # Verify shape.
         assert(x.shape[0] == 1)
@@ -584,7 +596,8 @@ def pointing_game(data_dir,
             grad = grad.to(pred_y.device)
             # assert(len(grads[0]) == 1)
             #grad = grads[0][-1]
-            hook.remove()
+            del grads[:]
+            #hook.remove()
 
             # Get activations at intermediate layer.
             acts = hook_get_acts(model, layer_names, x)[0]
@@ -617,7 +630,7 @@ def pointing_game(data_dir,
                         vis = vis['vis']
                         assert np.all(class_idx == vis['class_idx'])
                 except:
-                    print('No file for {i+start_index:06d}, running RISE.')
+                    print(f'No file for {i+start_index:06d}, running RISE.')
                     vis = explainer(x)
                     vis = vis.unsqueeze(1)
                     # Upsample visualization to image size.
@@ -727,11 +740,11 @@ def pointing_game(data_dir,
             np.savetxt(out_path, records)
             torch.save({'image_idx': image_idx,
                         'vis_shapes': vis_shapes,
-                        'y_shapes': y_shapes}, 'errors.pth')
+                        'y_shapes': y_shapes}, f'errors_new_v2_{vis_method}_{dataset}_{metric}.pth')
 
     torch.save({'image_idx': image_idx,
                 'vis_shapes': vis_shapes,
-                'y_shapes': y_shapes}, 'errors.pth')
+                'y_shapes': y_shapes}, f'errors_new_v2_{vis_method}_{dataset}_{metric}.pth')
     if out_path is not None:
         create_dir_if_necessary(out_path)
         np.savetxt(out_path, records)
@@ -859,6 +872,10 @@ if __name__ == '__main__':
         parser.add_argument('--end_index', type=int, default=-1)
         parser.add_argument('--load_from_save_dir', type='bool', default=False)
         parser.add_argument('--layer_name', type=str, default=None)
+        parser.add_argument('--num_masks', type=int, default=4000)
+        parser.add_argument('--p1', type=float, default=0.5)
+        parser.add_argument('--s', type=int, default=7)
+        parser.add_argument('--rise_filter_path', type=str, default='masks.npy')
         parser.add_argument('--gpu_batch', type=int, default=100)
 
         args = parser.parse_args()
@@ -882,6 +899,10 @@ if __name__ == '__main__':
                       end_index=args.end_index,
                       layer_name=args.layer_name,
                       debug=args.debug,
+                      num_masks=args.num_masks,
+                      p1=args.p1,
+                      s=args.s,
+                      rise_filter_path=args.rise_filter_path,
                       gpu_batch=args.gpu_batch)
     except:
         traceback.print_exc(file=sys.stdout)

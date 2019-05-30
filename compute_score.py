@@ -6,6 +6,7 @@ def compute_metric(records, metric='pointing', idx=None):
     if idx is None:
         example_idx, class_idx = np.where(records != 0)
     else:
+        idx = idx[:len(records), :]
         example_idx, class_idx = np.where(idx)
 
     if metric == 'pointing':
@@ -61,6 +62,23 @@ def compute_metrics(out_path, metric='pointing', dataset='voc_2007'):
     print(f'Overall Performance on {dataset}')
     compute_metric(records, metric=metric)
     hard_idx = np.loadtxt(f'data/hard_{dataset}.txt', delimiter=',')
+    if 'coco' in dataset:
+        print('Resorting COCO hard indices.')
+        pointing_paths = np.loadtxt('data/coco_pointing_game_file_list.txt', delimiter='\n', dtype=str)
+        pytorch_paths = np.loadtxt('data/coco_val2014_pytorch_filelist.txt', delimiter='\n', dtype=str)
+        d = {path: i for i, path in enumerate(pytorch_paths)}
+        new_hard_idx = np.zeros_like(records)
+        for i in range(len(hard_idx)):
+            if d[pointing_paths[i]] < len(new_hard_idx):
+                try:
+                    new_hard_idx[d[pointing_paths[i]]] = hard_idx[i]
+                except:
+                    import pdb; pdb.set_trace();
+        hard_idx = new_hard_idx
+
+        #reverse_sorted_idx = np.loadtxt('data/coco_val2014_reverse_idx.txt', dtype=int, delimiter='\n')
+        #import pdb; pdb.set_trace()
+        #hard_idx = hard_idx[reverse_sorted_idx]
     if records.shape != hard_idx.shape:
         print('Different shapes between records %s and hard idx %s.' % (records.shape,
                                                                         hard_idx.shape))
