@@ -27,7 +27,7 @@ import torchvision.utils as vutils
 
 import tqdm
 
-#import visdom
+import visdom
 
 from caffe_transforms import get_caffe_transform, CaffeChannelSwap
 
@@ -263,8 +263,7 @@ def pointing_game(data_dir,
         smooth_sigma = 0
 
     if debug:
-        print("Debugging")
-        # viz = visdom.Visdom(env=f'pointing_caffe_{converted_caffe}')
+        viz = visdom.Visdom(env=f'pointing_caffe_{converted_caffe}')
 
     # Load fine-tuned model with weights and convert to be fully convolutional.
     model = get_finetune_model(arch=arch,
@@ -655,7 +654,7 @@ def pointing_game(data_dir,
         if 'imnet' in dataset:
             continue
 
-    '''
+    
         # Move model back to GPU if necessary.
         if using_cpu:
             model.to(device)
@@ -703,10 +702,8 @@ def pointing_game(data_dir,
                 matplotlib.use('Agg')
                 import matplotlib.pyplot as plt
                 if converted_caffe:
-                    print('converted')
-                    #viz.image(vutils.make_grid(CaffeChannelSwap()(x[0]).unsqueeze(0), normalize=True), win=0)
+                    viz.image(vutils.make_grid(CaffeChannelSwap()(x[0]).unsqueeze(0), normalize=True), win=0)
                 else:
-                    print('not converted')
                     viz.image(vutils.make_grid(x, normalize=True), win=0)
                 viz.image(vutils.make_grid(vis[class_i], normalize=True), win=1)
                 # time.sleep(1)
@@ -731,9 +728,8 @@ def pointing_game(data_dir,
             t_loop.set_description(f'{metric_name} {running_avg:.4f}')
             if debug:
                 pass
-                # viz.image(vutils.make_grid(x[0].unsqueeze(0), normalize=True),
-                #           0)
-                # viz.image(vutils.make_grid(vis, normalize=True), 1)
+                viz.image(vutils.make_grid(x[0].unsqueeze(0), normalize=True), 0)
+                viz.image(vutils.make_grid(vis, normalize=True), 1)
         if i % save_iter == 0 and out_path is not None:
             create_dir_if_necessary(out_path)
             np.savetxt(out_path, records)
@@ -762,7 +758,7 @@ def pointing_game(data_dir,
 
     if out_path is not None:
         compute_metrics(out_path, metric=metric, dataset=dataset)
-    '''
+    
 
 def find_best_alpha(data_dir,
                     checkpoint_path,
